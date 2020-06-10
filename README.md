@@ -1,4 +1,7 @@
 # cdbn-home-away
+
+Copied from: https://docs.google.com/document/d/1ffZ6ykXoJNOhY32OOt-BrQvK4rGIWy9Cj8uluUl9qys/edit
+
 Home field advantage in two domestication clades of common bean
 
 Potential Authors

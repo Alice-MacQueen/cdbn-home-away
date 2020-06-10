@@ -37,3 +37,7 @@ vignettes/*.pdf
 
 # R Environment Variables
 .Renviron
+
+# Large SNP files used in R
+*.bk
+data/Filter_150Ct_MAF5per_CDBN_001_359_parents_fillin_names_QC_impute.rds
