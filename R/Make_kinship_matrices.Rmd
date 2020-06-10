@@ -1,0 +1,85 @@
+---
+title: "Make kinship matrices"
+author: "Alice MacQueen"
+date: 2020-06-10
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(bigsnpr)
+source("../R/cdbn_kinship.R")
+load("~/Github/cdbn-home-away/data/locations.rda")
+load("~/Github/cdbn-home-away/data/metadata.rda")
+load("~/Github/cdbn-home-away/data/phenotypes.rda")
+```
+
+
+# GAPIT kinship matrix code modified for bigsnpr object, and SVD code.
+
+`cdbn_kinship.R` has a couple of functions scavenged from other work I've done - one to make kinship matrices using the Van Raden method, one to do a singular value decomposition on kinship to get PC's which can be used to correct for population structure instead of the kinship matrix.
+
+Unfortunately, the backing file (`.bk`) to replicate this analysis is too large to share over Github, but I can share this file as needed to rerun this analysis.
+
+# Load bigsnpr data
+```{r}
+snp <- snp_attach("../data/Filter_150Ct_MAF5per_CDBN_001_359_parents_fillin_names_QC_impute.rds")
+```
+
+# Kinship matrices
+
+For subsets by gene pool and by race, and for all individuals with SY phenotypes.
+
+5 kinship matrices in total. Andean Gene_pool has only one Race sequenced in the CDBN, so the Andean kinship matrix can also be used for analyses of bean races.
+```{r}
+plants <- enframe(snp$fam$sample.ID, name = NULL, value = "Taxa")
+
+MA_sub <- which(plants$Taxa %in% metadata[metadata$Gene_pool == "MA",]$Taxa)
+Andean_sub <- which(plants$Taxa %in% metadata[metadata$Gene_pool == "Andean",]$Taxa)
+MesoRace_sub <- which(plants$Taxa %in% metadata[metadata$Race == "Mesoamerican",]$Taxa)
+DurangoRace_sub <- which(plants$Taxa %in% metadata[metadata$Race == "Durango",]$Taxa)
+CDBN_sub <- which(plants$Taxa %in% metadata$Taxa)
+
+K_MA <- cdbn_kinship(snp, ind.row = MA_sub)
+write_rds(K_MA, path = "../data/Kinship_MA_gene_pool.rds")
+K_Andean <- cdbn_kinship(snp, ind.row = Andean_sub)
+write_rds(K_Andean, path = "../data/Kinship_Andean_gene_pool.rds")
+K_MesoRace <- cdbn_kinship(snp, ind.row = MesoRace_sub)
+write_rds(K_Andean, path = "../data/Kinship_Mesoamerican_Race.rds")
+K_DurangoRace <- cdbn_kinship(snp, ind.row = DurangoRace_sub)
+write_rds(K_Andean, path = "../data/Kinship_Durango_Race.rds")
+K_full <- cdbn_kinship(snp, ind.row = CDBN_sub)
+write_rds(K_full, path = "../data/Kinship_Full_CDBN.rds")
+```
+
+# SVDs of population structure
+
+Same as above, for four subsets and the full CDBN.
+
+As the bigsnpr package notes, to obtain the Principal Components, you must use `predict()` on the result. https://privefl.github.io/bigsnpr/reference/snp_autoSVD.html
+```{r}
+#svd_full <- cdbn_autoSVD(snp = snp, k = 10, ncores = nb_cores())
+#write_rds(svd_full, path = "../data/SVD_full_CDBN.rds")
+#PCs_svd_full <- predict(svd_full)
+#SVD_PCs <- tibble(Taxa = snp$fam$sample.ID, as_tibble(PCs_svd_full)) %>%
+#  rename_with(~ str_replace(string = ., pattern = "V", replacement = "PC"))
+#write_csv(SVD_PCs, path = "../data/SVD/SVD_10_PCs_CDBN_and_parents.csv")
+
+# Now for the five subsets of the snp file which has CDBN individuals and their parents
+subset_list <- list(MA_gene_pool = MA_sub, Andean_gene_pool = Andean_sub, Mesoamerican_Race = MesoRace_sub, Durango_Race = DurangoRace_sub, Full_CDBN = CDBN_sub)
+
+for(i in seq_along(subset_list)[2:5]){
+  subset1 <- snp_subset(snp, ind.row = subset_list[[i]])
+  snp1 <- snp_attach(subset1)
+  svd_CDBN <- cdbn_autoSVD(snp = snp1, k = 10, ncores = nb_cores())
+  write_rds(svd_CDBN, path = paste0("../data/SVD/SVD_", names(subset_list)[i], 
+                                    ".rds"))
+  PCs_svd_full <- predict(svd_CDBN)
+  SVD_PCs <- tibble(Taxa = snp1$fam$sample.ID, as_tibble(PCs_svd_full)) %>%
+    rename_with(~ str_replace(string = ., pattern = "V", replacement = "PC"))
+  write_csv(SVD_PCs, path = paste0("../data/SVD/SVD_10_PCs_", names(subset_list)[i], 
+                                    ".csv"))
+}
+```
+
