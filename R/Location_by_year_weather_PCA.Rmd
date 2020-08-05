@@ -144,3 +144,17 @@ save_plot(filename = "../analysis/weather_PCA/Monthly_variable_PCA_PC5_PC6_Lat_L
 
 ```
 IDKI 1982 has outlier weather. Ah. Anomalous precipitation value. I bet that's a typo. 
+
+```{r}
+wea_bioclim2
+bioclim_pcs <- as_tibble(bioclim_pca$x)
+
+bioclim_pcs$Location_code <- wea_bioclim2$Location_code
+
+bioclim_pcs$Year <- wea_bioclim2$Year
+
+wea_bioclim2 %>% left_join(bioclim_pcs) %>%
+  select(Location_code, Year, PC1:PC4) %>%
+  write_csv("../analysis/weather_PCA/Bioclim_variables_PCA_PC1_to_PC4.csv")
+```
+
