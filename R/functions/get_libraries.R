@@ -1,0 +1,32 @@
+#' @title try to load a library, and download if needed
+#' 
+#' @description mostly helps resolve packrat bugs. Also installs in parallel.
+#' 
+#' @params lib_string charracter (vector) with package names
+#' @params cores integer or logical - install packages in parallel? TRUE uses
+#' `parallel::detectCores()`
+#' 
+#' @returns nothing, but loads packages into the user environment.
+
+get_libraries = function(lib_string, in_parallel=TRUE) {
+  
+  if (is.logical(in_parallel)) {
+    tt = in_parallel & ('parallel' %in% rownames(installed.packages()))
+    if (tt) {
+      threads = parallel::detectCores() 
+    } else {
+      threads = 1
+    }
+    
+  } else {
+    threads = in_parallel
+  }
+  
+  if (!require(lib_string, character.only=TRUE)) {
+    install.packages(lib_string, Ncpus=threads)
+    if (!require(lib_string, character.only=TRUE)) {
+      msg = paste("Could not install", lib_string)
+      stop(msg)
+    }
+  }
+}
