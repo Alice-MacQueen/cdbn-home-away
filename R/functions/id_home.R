@@ -49,7 +49,8 @@
     # print(x$Taxa)
     site_eff = paste(performance, '~ 0 + (1|', site, ')') %>% 
       formula %>% 
-      lmer(data=x) %>% 
+      lmer(data=x,
+           control=lmerControl(calc.derivs = FALSE)) %>% # tip from lme4 performance vignette
       coef %>% 
       extract2(site) %>% 
       set_colnames(performance)
@@ -102,6 +103,7 @@
 
 id_home = function(df, site, year, variety, performance, blup=TRUE, verbose=TRUE) {
   require(magrittr)
+  require(parallel)
   
   rel_colname = paste0('rel_', performance)
   
@@ -118,7 +120,8 @@ id_home = function(df, site, year, variety, performance, blup=TRUE, verbose=TRUE
   # find highest relative yield for each genotype
   df %<>%
     split(df[variety]) %>%
-    lapply(.id_best_performance, site, rel_colname, blup, verbose) %>%
+    mclapply(.id_best_performance, site, rel_colname, blup, verbose,
+             mc.cores=detectCores()) %>%
     do.call(rbind, .)
   
   return(df)

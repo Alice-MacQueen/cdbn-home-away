@@ -23,6 +23,9 @@ get_libraries = function(lib_string, in_parallel=TRUE) {
   }
   
   if (!require(lib_string, character.only=TRUE)) {
+    msg = paste('Trying to install', lib_string)
+    message(msg)
+    
     install.packages(lib_string, Ncpus=threads)
     if (!require(lib_string, character.only=TRUE)) {
       msg = paste("Could not install", lib_string)

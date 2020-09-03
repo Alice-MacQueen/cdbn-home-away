@@ -25,11 +25,16 @@ knitr::opts_chunk$set(message=FALSE,
 ```
 
 ```{r}
-libs = c('here', 'ggplot2', 'magrittr', 'lme4', 'reshape2', 'lattice', 'car')
+in_dir = 'data'  # within the R project
+in_perf = 'Phenotypes_of_sequenced_individuals_home_away_analysis.csv'
+in_kinship = file.path('Kinship', 'Kinship_Full_CDBN.rds')
+in_PC = file.path('SVD', 'SVD_10_PCs_Full_CDBN.csv')
 
-fn_path = 'Support Functions'
-for (i in list.files(fn_path)) {
-  source(file.path(fn_path, i))
+libs = c('here', 'ggplot2', 'magrittr', 'lme4', 'reshape2', 'lattice', 'car', 'bigsnpr', 'vegan')
+
+fn_path = file.path(getwd(), 'functions')
+for (i in list.files(fn_path, full.names=TRUE)) {
+  source(i)
 }
 
 for (i in libs) get_libraries(i)  # install if necessary
@@ -37,22 +42,27 @@ for (i in libs) get_libraries(i)  # install if necessary
 
 
 
-# Overview
+# Data Overview
+## Performance
+And related metrics
 ```{r}
-df = here('Data', 'Phenotypes_of_sequenced_individuals_home_away_analysis.csv') %>% 
-  read.csv()
-df[, 'Year'] %<>% as.factor
+perf = here(in_dir, in_perf) %>% 
+  read.csv(stringsAsFactors=FALSE)
+perf[, 'Year'] %<>% as.factor
 
 race_to_origin = c(Durango = 'Mesoamerican',
                    Jalisco = 'Mesoamerican',
                    Mesoamerican = 'Mesoamerican',
                    `Nueva Granada` = 'Andean')
 
-df$Origin = df[,'Race'] %>% 
+perf$Origin = perf[,'Race'] %>% 
   as.character %>%
   race_to_origin[.]
 
-head(df)
+head(perf)
+```
+```{r}
+type.convert(perf) %>% summary
 ```
 
 These are Cooperative Dry Bean Nursuries yield data, which Alice Macqueen (github.com/Alice-Macqueen) has compiled. These data were collected in multi-environmental trials from `r min(df$Year)` to `r max(df$Year)`. 
@@ -64,20 +74,82 @@ Location code are the sites - this data was collected across `r length(unique(df
 
 SY is yield (kg/ha).
 
+##Kinship
+Probably won't use these, but should probably test whether the PCs are useful
+```{r}
+kins = here(in_dir, in_kinship) %>% 
+  readRDS()
+
+n = 5
+kins[1:n, 1:n]
+```
+
+Same data, as a heatmap
+```{r}
+levelplot(kins)
+```
+A few sets of mostly-redundant lines.
+
+What does this look like in ordination space?
+```{r}
+kinord = capscale(kins~1)  # vegan
+screeplot(kinord, npcs=100)
+```
+
+```{r}
+plot(kinord, type='text')
+```
+Based on this, the choice of 10 axes is... realtively meaningless, but I suppose practical.
+
+But, the bigsnpr package might have a better way of handling meaningful genetic differences. 
+
+## Genetic Distance
+```{r}
+pcs = here(in_dir, in_PC) %>% 
+  read.csv()
+head(pcs)
+```
+
+Variances:
+```{r}
+colSums(pcs[, 2:ncol(pcs)]^2) %>% 
+  divide_by(., sum(.)) %>% 
+  multiply_by(100) %>% 
+  barchart(xlab='Percent Represented Variance')
+```
+So PCs 1-4 look good, especially 1 and 2. 
+
+```{r}
+merge(pcs, perf, by='Taxa') %>% 
+  xyplot(PC2 ~ PC1, group=Race, data=., auto.key=list(columns=4))
+```
+Clearly, the Andean domestication group (Nueva Granada) are genetically distinct different. 
+
 For each origin, we'll run the home field advantage model of Ewing et al (2019), PLOS One. This:
 1. Identifies a home site, the site of best relative performance
 2. Calculates the performance gain for each variety growing at it's home site
 
-# ID Home
+## Master DF
+Merge principal component axis scores with the performance data. 
 ```{r}
-df = id_home(df, 'Location_code', 'Year', 'Taxa', 'SY', blup=TRUE, verbose=TRUE) # uses a random intercept model if at least one observation appears at least twice
-
-df[df$Home, c('Location_code', 'Taxa', 'Race', 'Origin')]
+df = merge(perf, pcs, by='Taxa')
+head(df)
 ```
+
+# ID Home Sites
+```{r}
+df = id_home(df, 'Location_code', 'Year', 'Taxa', 'SY', 
+             blup=TRUE,
+             verbose=TRUE) # uses a random intercept model if at least one observation appears at least twice. Slower.
+
+df[df$is_home, c('Location_code', 'Taxa', 'Race', 'Origin')] %>% 
+  head(10)
+```
+An example of home sites for each variety.
 
 These are the number of varieties claiming each site as home, vs the number of years a site was used. 
 ```{r}
-vv = subset(df, Home) %>% 
+vv = subset(df, is_home) %>% 
   aggregate(Taxa ~ Location_code, ., function(x) length(unique(x)))
 years = aggregate(Year ~ Location_code, df, function(x) length(unique(x)))
 
@@ -90,16 +162,52 @@ xyplot(Taxa ~ jitter(Year),
        xlab="Years of Trials at a Single Location",
        ylab="Number of Home Varieties")
 ```
+Clearly, common sites have a lot of well-adapted varieties.
 
-Home field advantage
+# Home field advantage
+For subsets of lines. Without home field, with home field, with genetic distance (pcs 1-4), and with both home field and genetic distance. 
+
+For each subset, we'll load the subset's SVD of genetic distance, subset the data so that each site occurs at least 3 times, and then re-calculate the home field advantage.
+
+Then, we'll run four models using `lm()` and look at the results:
+
+1. An ANOVA, including a variable 'pVAR' which describes teh proportion of variance explained by each term.
+2. AIC for model selection.
+
+## Setup
+### Functions
 ```{r}
-performance = 'SY'
-year = 'Year'
-site = 'Location_code'
-variety = 'Taxa'
-ff = paste('scale(', performance, ', scale=FALSE) ~', year, '*', site, '+', variety)
+load_svd = function(x, in_dir, in_svd='SVD') {
+  require(magrittr)
+  svs = c(
+    Andean = "SVD_10_PCs_Andean_gene_pool.csv",
+    Durango = "SVD_10_PCs_Durango_Race.csv",
+    Full = "SVD_10_PCs_Full_CDBN.csv",
+    Mesoamerican = "SVD_10_PCs_MA_gene_pool.csv",
+    Mesoamerican_race = "SVD_10_PCs_Mesoamerican_Race.csv"
+  )
+  out = here(in_dir, in_svd, svs[x]) %>% 
+    read.csv
+  return(out)
+}
 
-dd = subset(df, Origin=='Andean')
+filter_siteyears = function(x, site='Location_code', year='Year', min_times=3) {
+  require(magrittr)
+  
+  common_sites = c(site, year) %>% 
+    x[, .] %>% 
+    unique %>%
+    extract2(site) %>% 
+    tapply(., ., length) %>% 
+    .[!is.na(.)] %>% 
+    .[.>=min_times] %>% 
+    names
+  
+  tt = x[, site] %in% common_sites
+  out = x[tt, ]
+  
+  return(out)
+}
 
 get_ss = function(model) {
   require(car) 
@@ -115,69 +223,166 @@ get_ss = function(model) {
   return(out)
 }
 
-naive = lm(formula(ff), data=dd)
-# gbye = paste(ff, '+', year, '*', variety) %>%  # a few of these had super-high leverage (leverage = 1). Mostly in PRIS in 2012.
-#   formula %>% 
-#   lm(data=df)
-local = paste(ff, '+', 'Home') %>% 
-  formula %>% 
-  lm(data=df)
+make_dataframe = function(group, performance, in_dir) {
+  require(magrittr)
+  sv = load_svd(group, in_dir)
+  df = merge(performance, sv, by='Taxa') %>% 
+    filter_siteyears %>% 
+    id_home('Location_code', 'Year', 'Taxa', 'SY', 
+        blup=TRUE,
+        verbose=TRUE) 
+  return(df)
+}
 
+fit_models = function(formulas, data, cores=1) {
+  require(parallel)
+  out = lapply(formulas, formula)
+  out = mclapply(out, lm, data=data, mc.cores=cores)
+  return(out)
+}
+
+get_coef = function(models) {
+  out = sapply(models, function(x) summary(x)$coefficients['is_homeTRUE', ])
+  return(t(out))
+}
+```
+
+
+### Models, Parameters, and Output Objects
+```{r}
+performance = 'SY'
+year = 'Year'
+site = 'Location_code'
+variety = 'Taxa'
+pcs = seq_len(4) %>% paste0('PC', .) %>% paste(collapse=' + ')
+min_siteyears = 3
+ncpu = detectCores()
+
+# All models
+naive = paste('scale(', performance, ', scale=FALSE) ~', year, '*', site, '+', variety)
 mods = list(naive = naive,
-            local = local)
-
-# for (i in names(mods)) {
-#   influenceIndexPlot(mods[[i]], main=i)
-# }
-
-sum_squares = lapply(mods, get_ss) %T>%
+            gen = gsub(variety, pcs, naive),
+            home = paste(naive, '+ is_home'),
+            genhome = gsub(variety, pcs, naive) %>%
+             paste('+ is_home')
+) %T>% 
   print
 
-sapply(mods, AIC) %T>%
-  print
+mod_out = list()
+anova_out = list()
+aic_out = list()
 ```
 
+## Run
+### Andean
+```{r cache=TRUE}
+origin = 'Andean'
+
+dd = make_dataframe(origin, perf, in_dir)
+mm = fit_models(mods, dd, cores=ncpu)
+mod_out[[origin]] = mm
+anova_out[[origin]] = mclapply(mm, get_ss, mc.cores=ncpu)
+aic_out[[origin]] = sapply(mm, AIC) %>% 
+  sort %>% 
+  as.matrix(ncol=1) %>% 
+  set_colnames('AIC') %T>%
+  print
+```
 
 ```{r}
-
-intercept = summary(local)[['coefficients']]['(Intercept)',] %T>% print
-home_advantage = summary(local)[['coefficients']]['HomeTRUE',] %T>% print
-
-HFA_percent = home_advantage['Estimate']/mean(df[, performance]) * 100
+anova_out[[origin]]
 ```
-HFA is more efficient than G*E in explaining yields.
+The home only model wins.
 
-The Home Field Advantage is worth `r signif(home_advantage['Estimate'], 3)` +/- `r signif(home_advantage['Std. Error'], 2)` kg/ha. This is a `r round(HFA_percent, 2)`% yield gain. 
-
-Since we have multiple years for some varieties, we can identify this at the variety level.
+The estimated effect sizes are:
 ```{r}
-variety_hfa = paste(ff, '+', variety, ':Home') %>% 
-  formula %>% 
-  lm(data=df)
+get_coef(mm[3:4])
+```
 
-Anova(variety_hfa, type="II") %T>%
+### Durango
+```{r cache=TRUE}
+origin = 'Durango'
+
+dd = make_dataframe(origin, perf, in_dir)
+mm = fit_models(mods, dd)
+mod_out[[origin]] = mm
+anova_out[[origin]] = mclapply(mm, get_ss, mc.cores=ncpu)
+aic_out[[origin]] = sapply(mm, AIC) %>% 
+  sort %>% 
+  as.matrix(ncol=1) %>% 
+  set_colnames('AIC') %T>%
   print
 ```
-Because few of these were only present in one year, interpret this with caution. 
-
-And we might want to know if different domestication events have different HFAs:
-```{r}
-origin_hfa = paste(ff, '+', 'Origin', '*Home') %>% 
-  formula %>% 
-  lm(data=df)
-
-Anova(origin_hfa, type="II") %T>%
-  print
-```
-Domestication events have different inherent HFAs. Assumptions for this model are fine. 
 
 ```{r}
-origin_coefs = effects(origin_hfa)
-is_origin = grepl('Home', names(origin_coefs))
-origin_coefs %<>% 
-  .[is_origin] %T>%
+anova_out[[origin]]
+```
+
+The estimated effect sizes are:
+```{r}
+get_coef(mm[3:4])
+```
+
+### Mesoamerican
+```{r}
+origin = 'Mesoamerican'
+
+dd = make_dataframe(origin, perf, in_dir)
+mm = fit_models(mods, dd)
+mod_out[[origin]] = mm
+anova_out[[origin]] = mclapply(mm, get_ss, mc.cores=ncpu)
+aic_out[[origin]] = sapply(mm, AIC) %>% 
+  sort %>% 
+  as.matrix(ncol=1) %>% 
+  set_colnames('AIC') %T>%
   print
 ```
+
+```{r}
+anova_out[[origin]]
+```
+
+The estimated effect sizes are:
+```{r}
+get_coef(mm[3:4])
+```
+
+
+# Discuss
+Home field advantage accounts for about 500 kg/ha yield increases, and also around 1-1.5% of variance around 1/3 of the genotype effect. Location by year and location effects were largest, with location-year explaining maybe 50% of variance. 
+
+Because we're pre-selecting good sites and then testing whether they're good, we should test this with permanova to see if they're better than expected. The right model is:
+
+1. Permute yields within site-year, across genotypes
+2. Re-assign home sites
+3. Test the effect of home site
+
+This will require quite a bit more efficient code, especially for step 3. Step 3 should look something like:
+
+```{r}
+# permute
+control = with(df, paste(Location_code, Year, sep='_')) %>% 
+  as.factor
+ss = shuffleSet(nrow(df), 99, control=how(blocks=control))
+
+tt = letters[1:12]
+cc = c(1,1,1,2,2,2,3,3,3,4,4,4) %>% as.factor
+ss = shuffleSet(12, 2, control=how(blocks=cc))
+apply(ss, 1, function(x) tt[x, ])
+
+Y = apply(ss, 1, function(x) df$rel_SY[x, ])
+```
+
+
+Y = permuted matrix, observations ~ permutations
+X = predictor matrix, absent home site
+H = permuted matrix, home assignment ~ permutations
+pY = qr.resid(qr(X), Y)
+for (i in permutation) {
+  y = pY[, i]
+  h = H[, i]
+  eff = qr.coef(qr(h), y)
+}
 
 
 
