@@ -120,8 +120,9 @@ id_home = function(df, site, year, variety, performance, blup=TRUE, verbose=TRUE
   # find highest relative yield for each genotype
   df %<>%
     split(df[variety]) %>%
-    mclapply(.id_best_performance, site, rel_colname, blup, verbose,
-             mc.cores=detectCores()) %>%
+    lapply(.id_best_performance, site, rel_colname, blup, verbose) %>% 
+    # mclapply(.id_best_performance, site, rel_colname, blup, verbose,
+    #          mc.cores=detectCores()) %>%
     do.call(rbind, .)
   
   return(df)
