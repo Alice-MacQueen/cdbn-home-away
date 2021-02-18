@@ -333,6 +333,9 @@ The estimated effect sizes are:
 get_coef(mm[2:3])
 ```
 
+## Variety-specific HFA
+
+
 ### Durango
 ```{r cache=TRUE}
 origin = 'Durango'
@@ -382,7 +385,7 @@ get_coef(mm[2:3])
 ```
 
 
-# Discuss
+# More
 Home field advantage accounts for about 500 kg/ha yield increases, and also around 1-1.5% of variance around 1/3 of the genotype effect. Location by year and location effects were largest, with location-year explaining maybe 50% of variance. 
 
 Because we're pre-selecting good sites and then testing whether they're good, we should test this with a permutation test to see if they're better than expected. The right model is:
@@ -390,14 +393,6 @@ Because we're pre-selecting good sites and then testing whether they're good, we
 1. Permute yields within site-year, across genotypes
 2. Re-assign home sites
 3. Test the effect of home site
-## Subset for speed
-```{r}
-# year_subset = unique(df$Year) %>%
-#   sample(5)
-# 
-# df %<>% subset(Year %in% year_subset) %>%
-#   droplevels
-```
 
 ## Permutation Results
 Fairly efficient (for the reduced dataset, minimal permutations)
@@ -420,9 +415,24 @@ dd = filter_siteyears(df,
                       year=year,
                       min_times=3)
 
+quick_resid = function(ff, data) {
+  require(Matrix)
+  X = model.matrix(ff, data) 
+  X = qr(X)
+  Y = model.frame(ff, data)[, 1]
+  
+  out = qr.resid(X, Y)
+  return(out)
+}
+
+quick_resid = compiler::cmpfun(quick_resid)
+
+
+
 partial_performance = "SY ~ Year*Location_code" %>% 
   formula %>% 
-  lm(data=dd) %>% 
+  # quick_resid(data=dd)
+  lm(data=dd) %>%
   residuals
 dd$part_SY = partial_performance
 
@@ -441,49 +451,54 @@ N = nrow(dd)
 ```
 
 
+
 ```{r cache=TRUE}
+blup_home=TRUE
+blup_home=FALSE # 4x faster. Very different results.
+
 ss = shuffleSet(N, n_perms, control=how(blocks=control)) %>% 
   t %>% 
   cbind(seq_len(N),
         .) %>%
   data.frame
+x = ss[, 1]
 
-coef_permute = mclapply(ss, function(x) {
-  # pt = proc.time()
+extr = function(x) {
+  x[x$is_home, c('Taxa', 'Location_code', 'Year')]
+}
+
+pt = proc.time()
+coef_permute = lapply(ss, function(x) {
+  # ID home site
   new_home = dd
-  new_home[, c('rel_SY', 'part_SY')] %<>% .[x, ]  # permute yields within site-year
+  new_home[x, c('rel_SY', 'part_SY')]  # permute yields within site-year
   new_home %<>%
     split(new_home[, variety]) %>%
-    lapply(.id_best_performance, site, 'rel_SY', blup=TRUE, verbose=FALSE) %>%  # This is the rate-limiting step.
+    lapply(.id_best_performance, site, 'rel_SY', blup=blup_home, verbose=FALSE) %>%  # This is the rate-limiting step.
     do.call(rbind, .) %>% 
     set_rownames(NULL)
-  # print('DONE: id home')
-  # print(proc.time() - pt)
   
-  # pt = proc.time()
+  # Perform fit_mod regression - extracting only coefficients. 
+  # Use direct QR decomposition
   X = model.matrix(fit_mod, data=new_home) %>% 
     qr(LAPACK=TRUE)
-  # print('DONE: model matrix')
-  # print(proc.time() - pt)
   
-  # pt = proc.time()
   Y = new_home[, 'part_SY', drop=FALSE] %>% 
     scale(scale=FALSE)
-  # print('DONE: scale Y')
-  # print(proc.time() - pt)
   
-  # pt = proc.time()
   home_coef = qr.coef(X, Y) %>% 
     as.matrix %>% 
     .['is_homeTRUE', ]
-  # print('DONE: HFA')
-  # print(proc.time() - pt)
   
   return(home_coef)
-}, mc.cores=ncpu) %>% 
+}) %>% #, mc.cores=ncpu) %>% 
   unlist# %>% 
   # abs # for two-tailed test
+proc.time() - pt
+```
 
+
+```{r cache=TRUE}
 alpha = sum((coef_permute - coef_permute[1]) > 0)/length(coef_permute)
 p_val = 1 - alpha
 
@@ -587,10 +602,16 @@ coef_permute = mclapply(ss, function(x) {
 colnames(coef_permute) %<>% 
   gsub(':is_homeTRUE', '', .) %>% 
   gsub('Year', '', .)
+```
 
-alpha = sweep(coef_permute, 2, coef_permute[1, ], '>=')
-alpha = colSums(alpha)/nrow(coef_permute)
-p_val = 1-2*abs(alpha-0.5)
+
+```{r cache=TRUE}
+alpha = sweep(coef_permute, 2, coef_permute[1, ], '>=') %>% 
+  colSums %>% 
+  divide_by(nrow(coef_permute))
+p_val = cbind(alpha, 1-alpha) %>% 
+  apply(1, min) %>% 
+  multiply_by(2)
 ```
 
 ```{r}
@@ -598,7 +619,7 @@ pltdf = melt(coef_permute)
 pltdf$observed = pltdf$Var1 == 'X1'
 
 pltdf$signif = p_val[as.character(pltdf$Var2)] < 0.05
-pltdf$signif = 2*(pltdf$signif & pltdf$observed)
+pltdf$signif = pltdf$signif & pltdf$observed
 
 ggplot(pltdf,
        aes(x=value,
@@ -612,14 +633,400 @@ ggplot(pltdf,
   theme_minimal()
 ```
 
-
-
-### Subset for speed
+```{r}
+mod = lm(value~Var2, data=subset(pltdf, signif))
+summary(mod)
+```
 
 ```{r}
-# year_subset = unique(df$Year) %>% 
-#   sample(5)
-# 
-# df %<>% subset(Year %in% year_subset) %>% 
-#   droplevels
+yearly_hfa = subset(pltdf, observed)
+
+hfa_mean = mean(yearly_hfa$value)
+hfa_err = sd(yearly_hfa$value)/sqrt(nrow(yearly_hfa)-1)
+
+ggplot(pltdf, 
+       aes(y=value,
+           x=factor(Var2))) +
+  scale_color_manual(values=c('steelblue1', 'steelblue4')) +
+  geom_violin(fill='tomato4',
+              color='tomato4',
+              alpha=0.5,
+              trim=FALSE) +
+  geom_hline(aes(yintercept = hfa_mean + hfa_err),
+             linetype='dashed',
+             size=0.5,
+             color='darkgray') +
+  geom_hline(aes(yintercept = hfa_mean- hfa_err),
+             linetype='dashed',
+             size=0.5,
+             color='darkgray') +
+  geom_point(data=subset(pltdf, observed),
+             aes(x=factor(Var2),
+                 y=value,
+                 color=signif),
+             size=2) +
+  labs(x='Year',
+       y='Home Field Advantage',
+       color='p < 0.05') +
+  theme_minimal() +
+  theme(axis.text.x=element_text(angle=90, vjust=0.5))
+
 ```
+
+
+## Variety HFA
+reusing code from annual HFA
+```{r}
+fit_mod = "part_SY ~ Taxa + Year + Taxa:is_home" %>% 
+  formula
+
+n_perms = 99
+
+# permute within site-year
+control = with(dd, paste(Location_code, Year, sep='_')) %>% 
+  as.factor
+N = nrow(dd)
+```
+
+### Permute Home
+```{r}
+.partial_siteyear = function(data, site, year) {
+  rel_perf = colnames(data) %>% 
+    .[grepl('rel_', .)] 
+  part_perf = gsub('rel', 'part', rel_perf)
+  perf = gsub('rel_', '', rel_perf)
+  
+  partial_performance = paste(perf, '~', site, '*', year) %>% 
+    formula %>% 
+    model.matrix(data=data) %>%
+    lm.fit(data[,perf]) %>%
+    residuals
+  data[, part_perf] = partial_performance
+  
+  return(data)
+}
+
+.home_site_permutations = function(data, site, year, variety, n, ncpu=4) {
+  # data can be partialed using .partial_siteyear beforehand
+  # Can vectorize for faster performance later. But tricky to manage array dimensions.
+  rel_perf = colnames(data) %>% 
+    .[grepl('rel_', .)] 
+  part_perf = gsub('rel', 'part', rel_perf)
+  perf = gsub('rel_', '', rel_perf)
+  
+  if (!(part_perf %in% colnames(data))) {
+    data %<>% .partial_siteyear(site, year)
+  }
+  
+  control = paste(data[, site], dd[, year], sep='_') %>% 
+    as.factor
+  n_obs = nrow(data)
+  
+  ss = shuffleSet(n_obs, n, control=how(blocks=control)) %>% 
+    t %>% 
+    cbind(seq_len(n_obs),
+          .) %>% 
+    data.frame
+  
+  data = data[, c(variety, site, year, rel_perf, part_perf)]
+  permutes = mclapply(ss, function(x) {
+    data[, c(rel_perf, part_perf)] %<>% .[x, ] # permute yields within site-year
+    data %<>%
+      split(data[, variety]) %>% 
+      lapply(.id_best_performance, site, rel_perf, blup=TRUE, verbose=FALSE) %>%  # This is the rate-limiting step.
+      do.call(rbind, .) %>% 
+      set_rownames(NULL)
+  }, mc.cores=ncpu)
+  permutes %<>% set_names(NULL)
+  return(permutes)
+}
+```
+
+
+```{r}
+dd_part = .partial_siteyear(dd, site, year)
+```
+
+
+```{r}
+dd_perm = .home_site_permutations(dd_part, site, year, variety, 99, ncpu)
+```
+
+
+```{r cache=TRUE}
+# ss = shuffleSet(N, n_perms, control=how(blocks=control)) %>% 
+#   t %>% 
+#   cbind(seq_len(N),
+#         .) %>%
+#   data.frame
+
+# will be more efficient to make a dataset of permuted home site, rel_SY, part_SY, then run the various tats on that dataset.
+fit_mod = "part_SY ~ Taxa + Year + Taxa:is_home" %>% 
+  formula
+
+variety_perms = mclapply(dd_perm, function(x) {
+  # pt = proc.time()
+  # new_home = dd
+  # new_home[, c('rel_SY', 'part_SY')] %<>% .[x, ]  # permute yields within site-year
+  # new_home %<>%
+  #   split(new_home[, variety]) %>%
+  #   lapply(.id_best_performance, site, 'rel_SY', blup=TRUE, verbose=FALSE) %>%  # This is the rate-limiting step.
+  #   do.call(rbind, .) %>% 
+  #   set_rownames(NULL)
+  # print('DONE: id home')
+  # print(proc.time() - pt)
+  
+  # pt = proc.time()
+  X = model.matrix(fit_mod, data=x) %>% 
+    qr(LAPACK=TRUE)
+  # print('DONE: model matrix')
+  # print(proc.time() - pt)
+  
+  # pt = proc.time()
+  Y = x[, 'part_SY', drop=FALSE] %>% 
+    scale(scale=FALSE)
+  # print('DONE: scale Y')
+  # print(proc.time() - pt)
+  
+  # pt = proc.time()
+  home_coef = qr.coef(X, Y) %>% 
+    as.matrix
+  home_coef = grepl('is_homeTRUE', rownames(home_coef)) %>% 
+    home_coef[., ]
+  # print('DONE: HFA')
+  # print(proc.time() - pt)
+  
+  return(home_coef)
+}, mc.cores=ncpu) %>% 
+  do.call(rbind, .)
+  # unlist# %>% 
+  # abs # for two-tailed test
+
+colnames(variety_perms) %<>% 
+  gsub(':is_homeTRUE', '', .) %>% 
+  gsub('Taxa', '', .)
+```
+
+
+```{r cache=TRUE}
+.two_tailed = function(coef_permute) {
+  alpha = sweep(coef_permute, 2, coef_permute[1, ], '>=') %>% 
+    colSums %>% 
+    divide_by(nrow(coef_permute))
+  p_val = cbind(alpha, 1-alpha) %>% 
+    apply(1, min) %>% 
+    multiply_by(2)
+  return(p_val)
+}
+variety_perms_p = .two_tailed(variety_perms)
+```
+
+```{r}
+.plot_permutations = function(coef_permute, p_vals) {
+  pltdf = melt(coef_permute)
+  pltdf$observed = pltdf$Var1 == 1
+  
+  pltdf$signif = p_val[as.character(pltdf$Var2)] < 0.05
+  pltdf$signif = pltdf$signif & pltdf$observed
+  return(pltdf)
+}
+
+pltdf = .plot_permutations(variety_perms, .two_tailed(variety_perms))
+
+ggplot(pltdf,
+       aes(x=value,
+           y=Var2,
+           color=observed,
+           size=2*signif,
+           alpha=(0.7*observed))) +
+  geom_point() +
+  scale_alpha(guide=FALSE) +
+  scale_size(guide=FALSE) +
+  ggtitle('p = 0.05 ~ adjusts to 40% (BH)') +
+  theme_minimal()
+```
+Most of the "significant" HFAs are actually smaller than expected. Is this the right permutation model?
+
+
+## variety hfa vs variance
+```{r fig.height=5, fig.width=7}
+var_hfa = variety_perms[1,]
+var_sd = tapply(dd[, performance], dd[, variety], sd)
+
+hfa_v_var = pltdf %>% 
+  subset(observed, select=c('Var2', 'value'))
+hfa_v_var$p_val = variety_perms_p[hfa_v_var$Var2]
+hfa_v_var$sd = var_sd[hfa_v_var$Var2]
+hfa_v_var$signif = hfa_v_var$p_val <= 0.05
+hfa_v_var %<>% merge(dd[, c(variety, 'Origin', 'Race')], by.x='Var2', by.y=variety)
+         
+ggplot(hfa_v_var, 
+       aes(x=sd,
+           y=value,
+           color=Origin)) +
+  facet_wrap(~Race) +
+  geom_point() +
+  labs(x='Standard Deviation in Yield',
+         y='Home Field Advantage',
+         title='Local Adaptation vs Yield Stability, by Race') +
+  geom_smooth(method='lm')
+
+```
+Negative HFAs are weird, but might be that a variety performs worse than the genetic potential (mean variety yield) and site-year potential (mean site yield), but less badly than other varieties at these site-years? I.e. they’re specialists in stressful sites? Not convinced of this... Checked this by directly calculating variety HFA.
+
+Anyway, the Meso/Nueva relationships are different from Durango.
+```{r}
+lm(value ~ sd*Origin, data=hfa_v_var) %>% 
+  Anova
+```
+
+```{r}
+lm(value ~ sd*Race, data=hfa_v_var) %>% 
+  summary
+```
+
+
+## Site Mean HFA Provided
+Do this raw for ease
+
+Need:
+variety
+variety home site
+variety HFA
+```{r}
+site_hfa = subset(dd, is_home, select=c(variety, site)) %>% 
+  unique
+site_hfa$hfa = var_hfa[site_hfa[, variety]]
+
+site_hfa = tapply(site_hfa$hfa, site_hfa[, site], mean) %>% 
+  data.frame(Location_code = names(.),
+             HFA = .,
+             stringsAsFactors=FALSE) %>% 
+  set_rownames(NULL)
+
+site_years = dd[, c(site, year)] %>% 
+  unique
+site_years = tapply(site_years[, year], site_years[, site], length)
+
+site_vars = subset(dd, is_home, select=c(variety, site)) %>% 
+  unique
+site_vars = tapply(site_vars[, variety], site_vars[, site], length)
+
+site_hfa$N_years = site_years[site_hfa[, site]]
+site_hfa$N_varieties = site_vars[site_hfa[, site]]
+```
+
+```{r}
+here('Results', 'site_HFA.csv') %>% 
+  write.csv(site_hfa, ., row.names=FALSE)
+```
+
+# Home Distance vs Genetic Distance
+Load locations
+```{r}
+library(sp)
+load(here('data', 'locations.rda'))
+
+locations %<>% 
+  .[, c('Longitue', 'Latitude')] %>% 
+  SpatialPointsDataFrame(locations, 
+                         proj4string=CRS("+proj=longlat +ellps=WGS84"))
+
+dists = spDists(locations)
+rownames(dists) = locations@data[, site] %>% unlist
+colnames(dists) = rownames(dists)
+```
+
+Distances among home sites
+```{r}
+home_dist = subset(dd, is_home, select=c(variety, site)) %>% 
+  unique
+
+find_home_distance = function(data, variety, site, distances) {
+  data %<>% subset(is_home, select=c(variety, site)) %>% 
+    unique
+  data[] %<>%
+    lapply(as.character)
+
+  vars = data[, variety]
+  homes = data[, site] %>%
+    set_names(vars)
+  nvar = length(vars)
+  
+  out = matrix(nrow = nvar,
+               ncol = nvar) %>% 
+    set_rownames(vars) %>% 
+    set_colnames(vars)
+  
+  for (i in vars) {
+    home_i = homes[i]
+    for (j in vars) {
+      home_j = homes[j]
+      out[i, j] = distances[home_i, home_j]
+    }
+    # out[home_i, ] = distances[home_i, homes]
+  }
+  # drop NA columns/rows
+  # is_na = is.na(out)
+  # na_rows = rowSums(is_na) == nvar
+  # na_cols = colSums(is_na) == nvar
+  # out = out[!na_rows, !na_cols]
+  
+  return(out)
+}
+
+home_dist = find_home_distance(dd, variety, site, dists)
+```
+
+### Genetic distance
+```{r}
+kinship = readRDS(here('data', 'Kinship', 'Kinship_Full_CDBN.rds'))
+```
+
+```{r}
+home_dist = home_dist[rownames(kinship), colnames(kinship)]
+
+
+```
+
+```{r}
+mantel(home_dist, kinship)
+```
+## genetic distance - within race
+### Mesomarican
+```{r}
+subvars = subset(dd, Origin=='Mesoamerican')[, variety] %>% 
+  unique
+
+subset_matrix = function(mat, values) {
+  in_row = rownames(mat) %in% values
+  in_col = colnames(mat) %in% values
+  return(mat[in_row, in_col])
+}
+
+tt = subset_matrix(home_dist, subvars)
+
+mantel(subset_matrix(home_dist, subvars),
+       subset_matrix(kinship, subvars))
+
+```
+
+### Andean
+```{r}
+subvars = subset(dd, Origin=='Andean')[, variety] %>% 
+  unique
+
+subset_matrix = function(mat, values) {
+  in_row = rownames(mat) %in% values
+  in_col = colnames(mat) %in% values
+  return(mat[in_row, in_col])
+}
+
+tt = subset_matrix(home_dist, subvars)
+
+mantel(subset_matrix(home_dist, subvars),
+       subset_matrix(kinship, subvars))
+
+```
+```
+

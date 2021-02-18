@@ -21,7 +21,6 @@
 #' @returns x, with an additional logical column `"Home"`, which indicates 
 #' whether the value of `x[, site]` is the home site.
 
-
 .id_best_performance = function(x, site, performance, blup=TRUE, verbose=TRUE) {
   require(magrittr)
   
@@ -32,13 +31,14 @@
     droplevels
   
   # find max years at any one site. 
-  site_years = x[, site] %>%
-    tapply(., ., length) %>%
-    max
-  
-  if ((site_years <= 2) & blup) { #(site_years < 2 & blup) {#
-    if (verbose) message('Cannot blup home field. Using (unshrunk) mean values')
-    blup = FALSE
+  if (blup) {
+    site_years = x[, site] %>%
+      tapply(., ., length) %>%
+      max
+    if (site_years < 3) { #(site_years < 2 & blup) {#
+      if (verbose) message('Cannot blup home field. Using (unshrunk) mean values')
+      blup = FALSE
+    }
   }
   
   # calculate mean performance within site.
@@ -46,28 +46,24 @@
     require(lme4)
     
     if (verbose) message('Using lme4 to identify the home site')
-    # print(x$Taxa)
     site_eff = paste(performance, '~ 0 + (1|', site, ')') %>% 
       formula %>% 
       lmer(data=x,
            control=lmerControl(calc.derivs = FALSE)) %>% # tip from lme4 performance vignette
       coef %>% 
-      extract2(site) %>% 
-      set_colnames(performance)
+      extract2(site)
+    site_eff %<>% 
+      .[,1] %>% 
+      set_names(rownames(site_eff))
+    
   } else {
-    site_eff = paste(performance, '~ 0 + ', site) %>% 
-      formula %>%
-      aggregate(data=x, mean, na.rm=TRUE)
-    rownames(site_eff) = site_eff[, 1]
-    colnames(site_eff)[2] = performance
-    site_eff[, 1] = NULL
+    site_eff = tapply(x[, performance], x[, site], mean, simplify=TRUE)  # faster than aggregate
   }
   
   # identify site with max mean
-  max_site = site_eff[, performance] %>% 
-    which.max %>% 
-    site_eff[., , drop=FALSE] %>% 
-    rownames
+  is_max = site_eff %>% 
+    which.max
+  max_site = names(site_eff)[is_max]
   
   x$is_home = x[, site] == max_site
   
