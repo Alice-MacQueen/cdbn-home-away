@@ -124,7 +124,9 @@ So PCs 1-4 look good, especially 1 and 2.
 merge(pcs, perf, by='Taxa') %>% 
   xyplot(PC2 ~ PC1, group=Race, data=., auto.key=list(columns=4))
 ```
-Clearly, the Andean domestication group (Nueva Granada) are genetically distinct different. 
+Clearly, the Andean domestication group (Nueva Granada) are genetically distinct different. Jalisco can roll into Durango. 
+
+These must be constrained axes.
 
 For each origin, we'll run the home field advantage model of Ewing et al (2019), PLOS One. This:
 1. Identifies a home site, the site of best relative performance
@@ -134,6 +136,7 @@ For each origin, we'll run the home field advantage model of Ewing et al (2019),
 Merge principal component axis scores with the performance data. 
 ```{r}
 df = merge(perf, pcs, by='Taxa')
+df$Race %<>% gsub('Jalisco', 'Durango', .)
 
 head(df)
 ```
@@ -192,7 +195,7 @@ xyplot(Taxa ~ jitter(Year),
        xlab="Years of Trials at a Single Location",
        ylab="Number of Home Varieties")
 ```
-Clearly, common sites have a lot of well-adapted varieties.
+Clearly, common sites have a lot of well-adapted varieties. This could be a side effect of how home was identified (blup/shrinkage), which penalizes rare sites. 
 
 # Home field advantage
 For subsets of lines. Without home field, with home field, with genetic distance (pcs 1-4), and with both home field and genetic distance. 
@@ -309,6 +312,7 @@ aic_out = list()
 
 ## Run
 ### Andean
+1. Merge dataframe subset with race kinship PCs
 ```{r cache=TRUE}
 origin = 'Andean'
 
@@ -382,6 +386,67 @@ anova_out[[origin]]
 The estimated effect sizes are:
 ```{r cache=TRUE}
 get_coef(mm[2:3])
+```
+
+
+## Plot Variances 
+```{r}
+pltdf = names(anova_out) %>% 
+  lapply(function(x) {
+    best_model = which.min(aic_out[[x]][,1])
+    best_model='home'
+    subav = anova_out[[x]][[best_model]]
+    subav$race = x
+    subav$model = names(anova_out[[x]])[best_model]
+    
+    return(subav)
+  }) %>% 
+  do.call(rbind, .)
+```
+
+
+```{r}
+variance_plot = 
+  ggplot(pltdf, 
+         aes(x=race,
+             y=pVAR,
+             fill=PREDICTOR)) +
+  scale_fill_brewer(palette='Set3') +
+  geom_col() +
+  labs(title='a) Sources of Variance in Yield',
+       y = 'Variance [%]',
+       x = 'Race',
+       fill = NULL) +
+  theme_minimal()
+
+variance_plot
+```
+
+
+## Yield ~ Year
+```{r}
+se_high = function(x) mean(x) + sd(x)/sqrt(length(x))
+se_low = function(x) mean(x) - sd(x)/sqrt(length(x))
+cat_to_num = function(x) as.numeric(as.character(x))
+
+mm = lm(SY ~ cat_to_num(Year)*Race, data=df)
+
+yield_yr = ggplot(df,
+                  aes(x=cat_to_num(Year),
+                      y=SY,
+                      color=Race)) +
+  scale_color_brewer(palette='Set2') +
+  stat_summary(fun=mean,
+               fun.max=se_high,
+               fun.min=se_low) +
+  geom_smooth(method='lm',
+              formula=y~x) +
+  labs(title = 'b) Yield Across Study Period',
+       x = 'Year',
+       y = 'Yield [kg/ha]') +
+  theme_minimal()
+
+yield_yr
 ```
 
 
