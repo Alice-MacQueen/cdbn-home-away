@@ -1,0 +1,25 @@
+2. var-hfa signif
+    use year hfa permutation code
+    change hfa:year to hfa:var
+
+1. var hfa ~ variance
+2. group:hfa effect
+    p-value. Base on permutation for now.
+3. home site distance ~ genetic distance
+4. site hfa ~ H
+
+
+TODO:
+1. Roll Jalisco into Durango
+1. Fig 1: variance, yield ~ time, HFA ~ time, faceted by race
+2. Fig 2: HFA ~ stability
+    Fig - N varieties at each location, colored by race?
+<<<<<<< HEAD
+=======
+    
+    
+    
+    
+    
+
+>>>>>>> hfa_with_kinship

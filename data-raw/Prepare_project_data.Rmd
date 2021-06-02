@@ -22,7 +22,7 @@ load("~/Github/CDBNGXE/data/Locations_small.rda")
 
 locations <- Locations_small %>%
   select(Location_code, State, Lat_best, Long_best, Elev_best, Location) %>%
-  rename(Latitude = Lat_best, Longitue = Long_best, Elevation = Elev_best)
+  rename(Latitude = Lat_best, Longitude = Long_best, Elevation = Elev_best)
 save(locations, file = "../data/locations.rda")
 ```
 
@@ -89,3 +89,207 @@ CDBN_307_Shiny_Crow	Shiny_Crow	CDBN_307	MA	Mesoamerican	56 SY
 CDBN_345_COSD_35    10 SY
 
 are in metadata but not in this SNP file. I don't remember why these were dropped or at any rate aren't included in this SNP file. Choosing to ignore them and keep going with 324 genotypes for now.
+
+
+# Weather data
+
+What if we use this data for this analysis? 
+http://www.cacpd.org.s3-website-us-west-2.amazonaws.com/climate_normals/NA_ReadMe.txt
+
+https://adaptwest.databasin.org/pages/adaptwest-climatena
+
+Can load ascii files into R using the raster package.
+
+
+Determine the site and year combinations that I have and subset the weather data so I just have those entries.Subsetting to just the 604 location by year combinations that I have yield data for, for the home-away analysis.
+```{r}
+wea_df <- read_csv("~/Github/CDBNGXE/data-raw/All_Weather_Data_2019-01-31.csv")
+
+Loc_by_year <- phenotypes %>% 
+  group_by(Location_code, Year) %>%
+  tally(name = "Yield_values")
+
+wea_locbyyr <- Loc_by_year %>%
+  left_join(wea_df, by = c("Location_code" = "DSSATwthCode", "Year")) %>%
+  select(-Yield_values, -Longitude, -Latitude, -Climate_bin, -WIND, 
+         -GDD_10Cbase, -DEWP, -SRAD) %>%
+  dplyr::rename(Latitude = Lat_best, Longitude = Long_best, Elevation = Elev_best)
+```
+Daily Weather variables I have for the entire growing season.
+daylength_hrs
+tmax_smoothed
+tmin_smoothed
+GDD_8Csmoothed
+cum_GDD_8Cbase
+PRCP
+
+Day of year: Minimum 79. Maximum 320.
+
+For each site*year, I could convert my daily weather data to the following climate variables. Then, we could download future weather data for the same climate variables.
+
+Climate Variables (see also http://climatemodels.forestry.ubc.ca/climatewna/downloads/help.pdf for more information )
+# -----------------
+
+## Monthly variables that I can compute:
+Tmin: minimum temperature for a given month (°C)
+Tmax: maximum temperature for a given month (°C)
+Tave: mean temperature for a given month (°C)
+Ppt:  total precipitation for a given month (mm)
+Dyln: mean daylength for a given month (hrs - I added, consistent for sites)
+GDD_8C: cumulative GDD at 8C for a given month (I added, we could compute for future just like DD5 below)
+```{r}
+wea_locbyyr %>% filter(Location_code == "IDKI" & Year == 1982)
+wea_monthly <- wea_locbyyr %>%
+  mutate(PRCP = case_when(PRCP > 20000 ~ 20,
+                          TRUE ~ PRCP)) %>%
+  filter(Location_code != "PRIS" & !is.na(Month)) %>%
+  filter(!(Location_code == "NYFR" & Year == 1990)) %>%
+  mutate(DD5 = ifelse((TMAX + TMIN)/2 >= 5.0,
+                      (TMAX + TMIN)/2 - 5,
+                      0),
+         DD_18 = ifelse((TMAX + TMIN)/2 <= 18.0 & (TMAX + TMIN)/2 > 0,
+                      (TMAX + TMIN)/2,
+                      0),
+         DD18 = ifelse((TMAX + TMIN)/2 >= 18.0,
+                      (TMAX + TMIN)/2 - 18,
+                      0)) %>%
+  group_by(Location_code, Year, Month) %>%
+  dplyr::summarise(
+    Tmin = min(TMIN, na.rm = TRUE), 
+    Tmax = max(TMAX, na.rm = TRUE),
+    Tave = mean((TMIN+TMAX)/2, na.rm = TRUE),
+    Ppt = sum(PRCP, na.rm = TRUE),
+    Dyln = mean(daylength_hrs, na.rm = TRUE),
+    GDD_8C = sum(GDD_8Cbase, na.rm = TRUE),
+    DD5 = sum(DD5, na.rm = TRUE),
+    DD_18 = sum(DD_18, na.rm = TRUE),
+    DD18 = sum(DD18, na.rm = TRUE)
+  ) %>%
+  filter(!is.infinite(Tmin) & !is.infinite(Ppt)) # remove 5 loc * year * month with no Temp values
+
+summary(wea_monthly)
+
+wea_monthly_wide <- wea_monthly %>%
+  select(Location_code:GDD_8C) %>%
+  pivot_longer(cols = -(Location_code:Month), names_to = "Variable", values_to = "Value") %>%
+  unite(col = "Variable", Variable, Month, sep = "_") %>%
+  pivot_wider(names_from = "Variable", values_from = "Value")
+
+write_rds(wea_monthly_wide, "../data/Monthly_weather_data_595_location_by_year_values.rds")
+
+library(lubridate)
+as_date(320) # Can drop November and December, or at least December, from PCA.
+as_date(79) # Can drop January through March from PCA.
+
+colSums(is.na(wea_bioclim))
+```
+
+
+## Bioclimatic variables that I can compute:
+MAT:  mean annual temperature (°C)
+MWMT: mean temperature of the warmest month (°C)
+MAP:  mean annual precipitation (mm)
+MSP:  mean summer (May to Sep) precipitation (mm) months 5 - 9
+AHM:  annual heat moisture index, calculated as (MAT+10)/(MAP/1000)
+SHM:  summer heat moisture index, calculated as MWMT/(MSP/1000)
+#
+DD5: degree-days above 5°C (growing degree days)
+GDD_5Cbase = ifelse((TMAX + TMIN)/2 >= 5.0,
+                      (TMAX + TMIN)/2 - 5,
+                      0),
+DD_18: degree-days below 18°C
+GDD_5Cbase = ifelse((TMAX + TMIN)/2 <= 18.0,
+                      (TMAX + TMIN)/2,
+                      0),
+DD18: degree-days above 18°C
+GDD_5Cbase = ifelse((TMAX + TMIN)/2 >= 18.0,
+                      (TMAX + TMIN)/2 - 18,
+                      0),
+#
+Tave_sm: summer (Jun to Aug) mean temperature (°C) months 6 - 8
+PPT_sm:  summer (Jun to Aug) precipitation (mm) months 6 - 8
+```{r}
+weaMSP <- wea_monthly %>%
+  filter(Month %in% c("05", "06", "07", "08", "09")) %>%
+  group_by(Location_code, Year) %>%
+  dplyr::summarise(MSP = mean(Ppt))
+
+wea_bioclim <- wea_monthly %>%
+  left_join(weaMSP, by = c("Location_code", "Year")) %>%
+  ungroup() %>%
+  group_by(Location_code, Year, MSP) %>%
+  dplyr::summarise(MAT = mean(Tave),
+            MWMT = max(Tave),
+            MAP = sum(Ppt),
+            DD5 = sum(DD5),
+            DD_18 = sum(DD_18),
+            DD18 = sum(DD18)) %>%
+  mutate(AHM = (MAT+10)/(MAP/1000),
+         SHM = MWMT/(MSP/1000)
+            )
+
+wea_sm <- wea_monthly %>%
+  filter(Month %in% c("06", "07", "08")) %>%
+  group_by(Location_code, Year) %>%
+  dplyr::summarise(Tave_sm = mean(Tave),
+            PPT_sm = sum(Ppt), .groups = "keep")
+
+wea_bioclim <- wea_bioclim %>%
+  full_join(wea_sm)
+
+wea_bioclim %>%
+  select(Location_code, Year, MAT, MWMT, MAP, MSP, AHM, SHM, DD5, DD_18, DD18, Tave_sm, PPT_sm) %>%
+  write_rds("../data/Weather_data_bioclim_595_location_by_year_values.rds")
+```
+
+
+
+
+##Variables that aren't relevant or that I can't compute:
+
+MCMT: mean temperature of the coldest month (°C)
+TD:   difference between MCMT and MWMT, as a measure of continentality (°C)
+MAR: mean annual solar radiation (MJ m-2 d-1) (excludes areas south of US)
+RH: mean annual relative humidity (%)
+DD_0: degree-days below 0°C (chilling degree days)
+NFFD: the number of frost-free days
+bFFP: the julian date on which the frost-free period begins
+eFFP: the julian date on which the frost-free period ends
+FFP: frost-free period
+PAS:  precipitation as snow (mm)
+EMT:  extreme minimum temperature over 30 years
+EXT: extreme maximum temperature over 30 years
+Eref: Hargreave's reference evaporation
+CMD:  Hargreave's climatic moisture index
+
+Tave_wt: winter (Dec to Feb) mean temperature (°C)
+PPT_wt:  winter (Dec to Feb) precipitation (mm)
+
+Non-relevant variables are before day 79 (late March) or after day 320 (mid-November), aka in winter, because beans aren't grown then. 
+
+Data citation:
+
+AdaptWest Project. 2015. Gridded current and future climate data for North America at 1km resolution, interpolated using the ClimateNA v5.10 software (T. Wang et al., 2015). Available at adaptwest.databasin.org.
+
+Reference:
+
+Hamann, A., T. Wang, D. L. Spittlehouse, T. Q. Murdock. 2013. A comprehensive, high-resolution  database of historical and projected climate surfaces for western North America. Bulletin of the American Meteorological Society, 94(9): 1307-1309. 
+
+
+```{r daylength function}
+
+## getmode: get the mode of a variable
+getmode <- function(v) {
+   uniqv <- unique(v)
+   uniqv[which.max(tabulate(match(v, uniqv)))]
+}
+
+# day.length.hrs: daylength calculation function
+
+day.length.hrs <- function(day, latitude) {
+  daylength.coeff <- asin(0.39795*cos(0.2163108 + 2*atan(0.9671396*tan(0.00860*(day - 186)))))
+  daylength.hrs <- 24 - (24/pi)*acos((sin(0.8333*pi/180) + sin(latitude*pi/180)*sin(daylength.coeff))/(cos(latitude*pi/180)*cos(daylength.coeff)))
+  return(daylength.hrs)
+}
+
+```

@@ -1,0 +1,1959 @@
+---
+title: "CDBN Home Field Advantage Analysis"
+author: "PME"
+created: "3/26/2021"
+date: "`r format(Sys.time(), '%d %B, %Y, %H:%M')`"
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding=encoding, output_dir=here::here('results'))})
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+  word_document: default
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(message=FALSE, 
+                      warning=FALSE,
+					            fig.align='center')
+```
+
+# Overview
+Results of the central dry bean nursery local adaptation and breeding strategy manuscript.
+
+Data are from yield trials of pre-release bean lines conducted across the US and Canada. 
+
+
+## Setup
+### Paths
+```{r}
+in_dir = 'data'  # within the R project
+in_perf = 'Phenotypes_of_sequenced_individuals_home_away_analysis.csv'  # yield data
+in_kin_dir = 'Kinship'  # kinship matrices, courtesy of Alice MacQueen
+in_kin_pattern = c('Kinship_', '_Race.rds')
+
+
+in_PC_dir = 'SVD'  # LD-adjusted genetic distance on 10 PCs, courtesy of Alice MacQueen
+in_PC_pattern = c('SVD_10_PCs_', '_Race.csv')
+in_locations = 'locations.rda'
+in_heritability = "bean_heritability_by_year_site_race.csv" # courtesy of Mikey Kantar
+
+out_dir = 'results'
+```
+
+
+
+### Variables
+```{r}
+# ids of columns, etc
+site = 'Location_code'  # spatial environment
+year = 'Year'           # temporal environment
+geno = 'Taxa'           # genotype
+pheno = 'SY'            # phenotype of interest = yield. Units kg/ha.
+popn = 'Race'           # population
+race = c('Durango', 'Mesoamerican', 'Nueva Granada')
+lat = 'Latitude'
+long = 'Longitue'
+names(race) = race
+
+seed = 4456  # for permutations
+
+color_palette='FantasticFox1'
+
+# nice names for model terms
+prettynames = c(
+  is_home = 'Home Site',
+  Residuals = 'Residuals',
+  Taxa = 'Genotype',
+  Location_code = 'Site',
+  Year = 'Year',
+  `Year:Location_code` = 'Site-Year',
+  GxE.Reduction = 'GxE.Reduction'
+)
+```
+
+#### Export?
+Export results to figures, rdata, etc?
+```{r load}
+export = FALSE
+export = TRUE
+```
+
+### Libraries and functions
+```{r libraries}
+libs = c(
+## workflow and scripting
+  'here',      
+  'magrittr', 
+  'reshape2', 
+  'broom',
+  'parallel',
+## modeling
+  'lme4',     
+  'car', 
+  'agricolae',
+  'vegan', 
+## Plotting
+  'wesanderson',
+  'ggplot2', 
+  'ggpmisc',
+  'gridExtra',
+## tables
+  'gt',          
+## Spatial/mapping
+  'sf',
+  'rnaturalearth'
+)
+
+fn_path = file.path(getwd(), 'functions')
+for (i in list.files(fn_path, full.names=TRUE)) {
+  source(i)
+}
+
+for (i in libs) get_libraries(i)  # install if necessary
+```
+
+### Load and munge
+
+Main dataframe
+```{r}
+df = here(in_dir, in_perf) %>% 
+  read.csv(stringsAsFactors=FALSE)
+
+# Merge the Jalisco race into Durango (which is supported by genetics)
+df[, popn] %<>% gsub('Jalisco', 'Durango', .)
+
+# Rename the Nueva Granada race to Andean
+# df[, popn] %<>% gsub('Nueva Granada', 'Andean', .)
+
+# make a numeric version of year for temporal trends.
+year_num = paste(year, 'Num', sep='_')
+df[, year_num] = df[, year] - max(df[, year])
+
+# year is otherwise a factor
+df[, year] %<>% 
+  as.numeric %>% 
+  factor(., levels=sort(unique(.)))
+
+# filter siteyears
+min_siteyears = 3
+df %<>% filter_siteyears(site='Location_code',
+                         year='Year',
+                         min_times=min_siteyears)
+
+type.convert(df) %>% summary
+```
+
+Heritability data from Mikey
+```{r}
+H = here(out_dir, in_heritability) %>% 
+  read.csv(stringsAsFactors=FALSE)
+colnames(H) %<>% gsub('Site', site, .)
+
+type.convert(H) %>% summary
+```
+
+Locations
+```{r}
+load(here(in_dir, in_locations), verbose=TRUE)
+head(locations)
+```
+
+Colors
+```{r}
+colors = wes_palette(color_palette)
+colors
+```
+
+
+### Notebook Functions
+```{r}
+# Pretty print values
+pp = function(x, digits=3, decimals=2) {
+  sprinter = paste('%.', decimals, 'f', sep='')
+  value = signif(x, digits)
+  out = sprintf(sprinter, value)
+  return(out)
+}
+
+# Standard Error
+se = function(x) sd(x) / sqrt(length(x))
+
+# tidy a linear model
+statsum = function(x, coef, stat=c('est', 'se', 'tstat', 'pval')) {
+  out = x[x$term==coef, ]
+  stat = switch(stat,
+                'est' = out[, 'estimate'],
+                'se' = out[, 'std.error'],
+                'tstat' = out[, 'statistic'],
+                'pval' = out[, 'p.value'])
+  return(out)
+}
+
+# munge an anova table
+get_ss = function(model) {
+  a = model
+  out = data.frame(
+    Predictor = rownames(a),
+    `Sum Squared` = a$`Sum Sq`,
+    `Proportion of Variance` = round(a$`Sum Sq` / sum(a$`Sum Sq`) *100, 2),
+    df = a$Df,
+    `F Statistic` = round(a$`F value`, 4),
+    `p Value` = signif(a$`Pr(>F)`, 3)
+  )
+  return(out)
+}
+gg_themer = function(x, remove_strip=FALSE) {
+  
+  out = x + 
+  theme_minimal() +
+  theme(panel.grid=element_blank(),
+        axis.ticks=element_line(color='gray',
+                                size=0.2),
+        axis.title=element_text(size=9))
+  
+  if (remove_strip) {  # for the bottom panel of fully faceted figures
+    out = out + theme(strip.text=element_blank())
+  }
+  return(out)
+}
+
+gg_mapthemer = function(x) {
+  out = x + 
+    theme_minimal() +
+    theme(axis.ticks=element_line(color='gray',
+                              size=0.2),
+      axis.title=element_text(size=9),
+      legend.title=element_text(size=9),
+      panel.grid=element_line(color='gray',
+                              size=0.2),
+      legend.position='bottom')
+  return(out)
+}
+```
+
+
+# Yield
+
+We begin the analysis by setting the context: The spatial and temporal variation of yield.
+
+## FIGURE 1: Yield ~ Location 
+This will make the maps in Figure 1. Calculate average yield at each site by population
+```{r fig.height=2.5, fig.width=6.5}
+mean_yields = paste(pheno, '~', site, '+', popn) %>% 
+  formula %>% 
+  aggregate(data=df, mean)
+```
+
+Load the site location data and merge with mean yields
+```{r fig.height=2.5, fig.width=6.5}
+wgs84 = st_crs("+proj=longlat +ellps=WGS84")
+equal_area = st_crs("+init=epsg:2163")
+
+keep_sites = locations[, site] %>% 
+  sapply(function(x) x %in% df[, site])
+site_map = locations %>% 
+  .[keep_sites, ] %>%
+  st_as_sf(coords=c(long, lat),
+           crs=wgs84) %>% 
+  st_transform(equal_area)
+
+site_map %<>% merge(mean_yields, by=site)
+```
+
+Make a baselayer
+```{r}
+site_box = st_transform(site_map, equal_area) %>% 
+  st_union%>% 
+  st_convex_hull %>% 
+  st_buffer(dist=800000) %>% 
+  st_bbox
+
+# rnaturalearth basemap
+basemap = ne_countries(country=c('Canada', 'United States of America', 'Mexico'), 
+                       scale='medium',
+                       returnclass='sf') %>% 
+  st_transform(equal_area) %>% 
+  st_crop(site_box)
+```
+
+### Plot
+```{r fig.height=3, fig.width=6.5}
+
+site_plot = ggplot(basemap) +
+  facet_wrap(paste('~', popn) %>% formula,
+             nrow=1) +
+  scale_fill_gradientn(colors=colors[c(3,2,5)], 
+                       limits=range(data.frame(site_map)[, pheno])) + 
+  geom_sf(fill='white',
+          size=0.2) +
+  geom_sf(data=site_map,
+          aes_string(fill=pheno),
+          shape=21,
+          size=3,
+          alpha=0.5,
+          color='black') +
+  theme_minimal() +
+  labs(fill=expression(paste('Mean Yield [kg ', 'ha'^-1, ']')),
+       parse=TRUE) +
+  theme(axis.ticks=element_line(color='gray',
+                                size=0.2),
+        axis.title=element_text(size=9),
+        legend.title=element_text(size=9),
+        panel.grid=element_line(color='gray',
+                                size=0.2),
+        legend.position='bottom')
+site_plot  
+```
+
+### Export
+```{r}
+if (export) {
+  out = "Figure 1 - Yield by Site.jpg" %>% 
+    here('results', .)
+  jpeg(out, width=6.5, height=3, units='in', res=300)
+  grid.arrange(site_plot)
+  dev.off()
+  
+  # save points data
+  here('results', 'figure data', 'Figure 1 - Yield by Site.gpkg') %>% 
+    st_write(site_map, ., delete_layer=export)
+  # save basemap
+  here('results', 'figure data', 'CDBN Basemap.gpkg') %>% 
+    st_write(basemap, ., delete_layer=export)
+}
+```
+
+
+
+We next assessed overall yield performance and performance gains by each race across the study period. 
+
+## TABLE S1: ANOVA Yield ~ Time
+The model is:
+```{r}
+# output strucure
+pheno_trend = list(form=NULL,
+                   model=NULL,
+                   anova=NULL,
+                   plot=NULL)
+
+# formula
+pheno_trend$form = paste(pheno, '~', year_num, '*', popn) %T>% print
+```
+
+Run this model
+```{r}
+pheno_trend$model = pheno_trend$form %>% 
+  formula %>% 
+  lm(data=df)
+
+# fitted and residual values
+pheno_trend$fr = data.frame(
+  df[, c(year, popn)],
+  fitted = fitted(pheno_trend$model),
+  resid = residuals(pheno_trend$model)
+)
+  
+pheno_trend$anova = Anova(pheno_trend$model)
+
+pheno_trend$anova
+```
+Each race had a different expected yield.
+
+
+```{r}
+pheno_trend$model %>% summary
+```
+Durango yielded best. All races' yields increased, but Mesoamerican yields increased fastest.
+
+### Draw Table
+Make this a nice table.
+```{r}
+tabs1 = pheno_trend$anova
+rownames(tabs1) %<>%
+  gsub('_Num', '', .) %>% 
+  gsub('\\:', '*', .)
+tabs1 %<>%
+  data.frame(X = rownames(.),
+             .) %>% 
+  set_colnames(c(' ', colnames(tabs1))) %>% 
+  gt %>% 
+  fmt_number(columns=c('Sum Sq'), n_sigfig=4) %>% 
+  fmt_number(columns='F value', decimals=2) %>% 
+  fmt_number(columns='Pr(>F)', decimals=3) %>% 
+  fmt_missing(columns=c(4, 5), missing_text='-') %>% 
+  tab_header('Table S1',
+             subtitle='ANOVA of Yield Across Time') %>% 
+  opt_align_table_header(align='left') %>% 
+  cols_align('right',
+             columns=1)
+
+tabs1
+```
+
+### Export
+```{r}
+if (export) {
+  out = pheno_trend$anova %>% 
+    signif(4)
+  "Table S1 - Yield Trends ANOVA.csv" %>% 
+    here(out_dir, .) %>% 
+    write.csv(out, .)
+  
+  "Table S1 - Yield Trends ANOVA.html" %>% 
+    here(out_dir, .) %>% 
+    gtsave(tabs1, .)
+}
+```
+
+
+##ESTIMATES: Yield ~ Race
+```{r}
+# anova values
+pta = list(intercept = pheno_trend$anova[popn, ],
+           slope = pheno_trend$anova[paste(year_num, popn, sep=':'), ],
+           resid = pheno_trend$anova['Residuals', ]) %>% 
+  lapply(set_names, c('ss', 'df', 'f', 'p'))
+
+ptl = summary(pheno_trend$model)
+
+
+main_effects =  
+  paste(pheno, '~ 0 + ', year_num, '*', popn) %>% 
+  formula %>% 
+  lm(data=df) 
+
+tidy(main_effects)
+```
+```{r}
+HSD.test(main_effects, 'Race') %>% print
+```
+
+
+
+## ESTIMATES: Yield ~ Time | Race
+```{r}
+get_mod = function(x) {
+  out = paste(pheno, year_num, sep='~') %>% 
+    formula %>% 
+    lm(data=x) %>% 
+    tidy
+  return(out)
+}
+interxn = lapply(race, function(x) {
+  ss = df[df[, popn] == x, ]
+  out = data.frame(popn=x,
+                   get_mod(ss)
+  )
+  return(out)
+}) %>% 
+  do.call(rbind, .) %>% 
+  set_rownames(NULL)
+
+interxn[, sapply(interxn, is.numeric)] %<>% signif(4)
+
+interxn
+```
+Durango lines yielded the most at the end of the study period. Nueva Granada lines yielded the least. Mesoamerican yields grew fastest.
+
+### FIGURE 2a: Yield ~ Time | Race
+```{r}
+se_high = function(x) mean(x) + se(x)
+se_low = function(x) mean(x) - se(x)
+cat_to_num = function(x) as.numeric(as.character(x))
+
+df_2a = df[, c(year, pheno, popn)]
+df_2a[, year] %<>% cat_to_num
+df_2a[, 'Year0'] = df_2a[, year] - min(df_2a[, year]) # set 1980 as year zero.
+
+yield_yr = ggplot(df_2a,
+                  aes_string(x='Year0', 
+                             y=pheno,
+                             color=popn,
+                             fill=popn,
+                             grp.label=popn)) +
+  facet_wrap(paste('~', popn) %>% formula,
+             nrow=1) +
+  scale_x_continuous(breaks=seq(0, 35, by=10),
+                     labels=seq(1980, 2015, by=10)) +
+  scale_color_manual(values=colors, guide=NULL) +
+  scale_fill_manual(values=colors, guide=NULL) +
+  stat_summary(fun=mean,
+               fun.max=se_high,
+               fun.min=se_low,
+               shape=20,
+               size=0.2) +
+  geom_smooth(method='lm',
+              formula=y~x,
+              alpha=0.1,
+              size=0.2,
+              fullrange=TRUE,
+              level=0.95) +
+  stat_poly_eq(
+    aes(label=paste('list(',
+                    stat(eq.label),
+                    ',italic(p) < 0.001)',
+                    sep="")),
+    formula=y~x,
+    parse=TRUE,
+    label.y.npc=0.9,
+    size=3,
+    color='black'
+  ) +
+  labs(x = 'Year',
+       y = 'Yield [kg/ha]',
+       color=NULL,
+       fill=NULL) +
+  theme_minimal() +
+  theme(panel.grid=element_blank(),
+        axis.ticks=element_line(color='gray',
+                                size=0.2),
+        axis.title=element_text(size=9),
+        axis.text.x=element_text(angle=90,
+                                 hjust=0.5,
+                                 vjust=0.5))
+```
+
+Plot this.
+```{r fig.height=3, fig.width=6.5}
+yield_yr
+```
+
+#### Export Data
+```{r}
+if (export) {
+  here('results', 'figure data', 'Fig 2a - yield by year.csv') %>% 
+    write.csv(df_2a, ., row.names=FALSE)
+}
+```
+
+
+
+
+# Home Field Advantage
+## Select genetic distance PCs
+To test whether home field advantage is partially determined by genetics, we need to identify how to incorporate genetic info. The PCs are produced by the package, `bigsnpr`. This package corrects for short- and long-distance linkage disequilibrium, and returns 10 PCs by default. The PCs are primary coordinates, so distances are preserved.
+
+While this isn't all of the genetic variation, it should be most of the genetic variation.
+```{r}
+PCs = lapply(race, function(x) {
+  paste(in_PC_pattern[1], x, in_PC_pattern[2], sep='') %>% 
+    here(in_dir, in_PC_dir, .) %>%
+    read.csv
+})
+
+PC_scree = sapply(PCs, function(x) {
+  is_PC = grepl('PC', colnames(x))
+  x = x[, is_PC]^2
+  out = colSums(x)/sum(x)
+  return(out)
+}) %>% 
+  as.data.frame
+
+PC_scree[, 'PC'] = rownames(PC_scree) %>% 
+  gsub('PC', '', .) %>% 
+  as.numeric
+PC_scree %<>% melt(id.vars=c('PC'), variable.name=popn, value.name='pVar')
+
+screeplot = ggplot(PC_scree,
+                   aes_string(x='PC',
+                              y='pVar',
+                              fill=popn)) +
+  scale_x_continuous(breaks=seq(1, 10, by=2)) +
+  facet_wrap(paste('~', popn) %>% formula) +
+  scale_fill_manual(values=colors, guide=NULL) +
+  geom_col(position='dodge') +
+  labs(x = 'Principal Coordinate Axis',
+       y = 'Variance [%]',
+       color=NULL,
+       fill=NULL) +
+  theme_minimal() +
+  theme(panel.grid=element_blank(),
+        panel.grid.major.y=element_line(size=0.2, color='white'),
+        panel.ontop=TRUE,
+        axis.ticks=element_line(color='gray',
+                                size=0.2),
+        strip.background=element_blank(),
+        strip.text=element_blank(),
+        axis.title=element_text(size=9))
+```
+
+```{r}
+ordplots = lapply(PCs, function(x) {
+  x[, c('PC1', 'PC2')]
+}) %>%
+  do.call(rbind, .)
+ordplots[, popn] = rownames(ordplots) %>% 
+  strsplit('\\.') %>% 
+  sapply('[', 1)
+
+ordination = ggplot(ordplots,
+                    aes_string(x='PC1',
+                               y='PC2',
+                               color=popn)) +
+  scale_color_manual(values=colors, guide=NULL) +
+  coord_equal() +
+  facet_wrap(paste('~', popn) %>% formula) +
+  geom_hline(aes(yintercept=0),
+             size=0.2,
+             color='gray') +
+  geom_vline(aes(xintercept=0),
+             size=0.2,
+             color='gray') +
+  geom_point(size=0.5) +
+  labs(x='PC 1',
+       y='PC 2') +
+  theme_minimal() +
+  theme(panel.grid=element_blank(),
+        axis.ticks=element_line(color='gray',
+                                size=0.2),
+        strip.text=element_text(size=10,
+                                face='bold'),
+        axis.title=element_text(size=9))
+  
+```
+
+## FIGURE S2: PCs and Scree | Race
+```{r fig.height=5, fig.width=7}
+grid.arrange(ordination + ggtitle('A)'), 
+             screeplot + ggtitle('B)'), 
+             nrow=2)
+```
+Mesoamerican lines are differentiated along PC 1, with a minor break after PC 3. Durango lines have a minor break after PC 3 with good structure along PCs 1 and 2. Andean lines aren't horribly structured, but the break after PC2 is strongest.
+
+### Export Figure S2
+```{r}
+p1 = ordination + ggtitle('A)')
+p2 = screeplot + ggtitle('B)')
+
+if (export) {
+  out = "Figure S2 - Kinship Ordination and Scree.jpg" %>% 
+    here(out_dir, .)
+  jpeg(out, width=6.5, height=5, units='in', res=300)
+  grid.arrange(p1, p2, nrow=2)
+  dev.off()
+  
+  here(out_dir, 'figure data', 'Fig S2 - ordination scree.csv') %>% 
+    write.csv(PC_scree, ., row.names=FALSE)
+  here(out_dir, 'figure data', 'Fig S2 - ordination ax1-2 scores.csv') %>% 
+    write.csv(ordplots, ., row.names=FALSE)
+}
+```
+
+
+For simplicity, we'll take the first 3 PCs. The amount of variation these account for is:
+
+```{r}
+ss = subset(PC_scree, PC %in% c(1:3))
+tapply(ss[, 'pVar'], ss[, popn], sum) %>% 
+  round(3) %>% 
+  multiply_by(100)
+```
+Units are percentage points.
+
+## FIGURE N.S.: CDBN PCs 1-2
+And for completedness, to justify the analysis of these lines by race:
+```{r fig.height=3, fig.width=3.5}
+full_ord = here(in_dir, in_PC_dir, paste0(in_PC_pattern[1], 'Full_CDBN.csv')) %>% 
+  read.csv %>%
+  merge(df[, c(geno, popn)], ., by=geno)
+
+full_ord =
+  ggplot(full_ord,
+         aes_string(x='PC1',
+                    y='PC2',
+                    color=popn)) +
+  scale_color_manual(values=colors) +
+  coord_equal() +
+  geom_hline(aes(yintercept=0),
+             size=0.2,
+             color='gray') +
+  geom_vline(aes(xintercept=0),
+             size=0.2,
+             color='gray') +
+  geom_point(size=0.5,
+             alpha=0.5) +
+  labs(x='PC 1',
+       y='PC 2',
+       color=NULL) +
+  theme_minimal() +
+  theme(panel.grid=element_blank(),
+        axis.ticks=element_line(color='gray',
+                                size=0.2),
+        axis.title=element_text(size=9),
+        legend.position=c(0.2, 0.15),
+        legend.key.height=unit(0.05, 'npc'))
+
+full_ord
+  
+```
+Andean lines are genetically distinct, and Durango and Mesoamerican are relatively
+distinct. 
+
+
+
+## Estimate
+### ID Home Site
+```{r}
+ncpu = detectCores()
+dd = mclapply(race, function(x) {
+  x = df[, popn] == x
+  x = df[x, ]
+  
+  x %<>% id_home(site, year, geno, pheno, blup=TRUE, verbose=FALSE)
+  return(x)
+  },
+  mc.cores = ncpu
+) %>% 
+  do.call(rbind, .) %>% 
+  set_rownames(NULL)
+
+
+df = dd
+```
+
+
+### Models, Parameters, and Output Objects
+```{r}
+n_PC = 3
+
+pcs = seq_len(n_PC) %>% 
+  paste0('PC', .) %>% 
+  paste(collapse=' + ')
+pcs_home = seq_len(n_PC) %>% 
+  paste0('PC', .) %>% 
+  paste0('*is_home') %>%
+  paste(collapse='+')
+
+
+# All models
+naive = paste('scale(', pheno, ') ~', year, '*', site, '+', geno)
+mods = list(
+  naive = naive,
+  gen = gsub(geno, pcs, naive),
+  home = paste(naive, '+ is_home'),
+  genxhome = gsub(geno, pcs_home, naive)
+) %>% 
+  lapply(formula) %T>% 
+  print
+
+mod_out = list()
+anova_out = list()
+aic_out = list()
+```
+
+### Run
+
+Each race will be run separately, for computational purposes.
+
+Steps:
+
+1. Merge dataframe subset with race kinship PCs
+2. (optional) id home site
+3. linear models
+4. calculate variances
+5. calculate AICs
+
+This will take a long time. Cache and reload if possible. 
+```{r cache=TRUE}
+load_cache = FALSE
+load_cache = TRUE
+path_to_saved = here(out_dir, 'HFA_ANOVA.RData')
+
+if (file.exists(path_to_saved) & load_cache) {
+  load(path_to_saved)
+} else {
+  mod_out = lapply(race, function(x) {
+    dd = df[, popn] == x
+    dd = df[dd, ] %>% 
+      merge(PCs[[x]], by='Taxa')
+    
+    out = mclapply(mods, lm, data=dd, mc.cores=ncpu)
+    return(out)
+  })
+  
+  anova_out = lapply(mod_out, function(x) {
+    mclapply(x, Anova, mc.cores=ncpu)
+  })
+  
+  aic_out = lapply(mod_out, function(x) {
+    sapply(x, AIC) %>% 
+      sort %>% 
+      as.matrix(ncol=1) %>% 
+      set_colnames('AIC')
+  })  
+  
+  save(anova_out, aic_out, file=path_to_saved)
+}
+```
+
+### Table S2: Model Selection
+Per model selection with AIC, each race had the same rank-order. The home field advantage model was most parsimonious in all cases, by quite a lot.
+```{r}
+aic_table = 
+  do.call(cbind, aic_out) %>% 
+  set_colnames(names(aic_out)) %>% 
+  round(0)
+aic_table
+```
+
+#### Export Table S2
+```{r}
+name_replacer=c(
+  home = 'With Home Field',
+  naive = 'Variety, Site, Year',
+  genxhome = 'With Home Field, Kinship',
+  gen = 'With Kinship'
+)
+
+tabs2 = aic_table
+rownames(tabs2) %<>%
+  name_replacer[.]
+tabs2 %<>%
+  data.frame(X = rownames(.),
+             .) %>% 
+  set_colnames(c(' ', colnames(tabs2))) %>% 
+  gt %>% 
+  tab_header('Table S2',
+             subtitle=md('AIC<sup>1</sup> of Competing Home Field Advantage Models')) %>% 
+  opt_align_table_header(align='left') %>% 
+  cols_align('right',
+             columns=' ') %>% 
+  tab_source_note(md("<sup>1</sup>Akaike Information Criterion"))
+tabs2
+```
+
+
+```{r}
+if (export) {
+  "Table S2 - HFA Model Selection.csv" %>% 
+    here(out_dir, .) %>% 
+    write.csv(aic_table, .)
+  
+  "Table S2 - HFA Model Selection.html" %>% 
+    here(out_dir, .) %>% 
+    write.csv(tabs2, .)
+}
+```
+
+
+We want to know how much better home is versus genxhome
+```{r}
+aic_table['home', ] - aic_table['genxhome', ]
+```
+
+### Table 2: HFA Anova
+```{r}
+min_aic = sapply(race, function(x) {
+  sub_aic = aic_out[[x]]
+  out = which.min(sub_aic[, 'AIC']) %>% 
+    rownames(sub_aic)[.]
+})
+anova_tables = lapply(race, function(x) {
+  min_aic = min_aic[x]
+  data.frame(
+    popn = x,
+    get_ss(anova_out[[x]][[min_aic]])
+  )
+}) %>% 
+  do.call(rbind, .) %>% 
+  set_rownames(NULL)
+
+colnames(anova_tables) %<>% gsub('popn', popn, .)
+
+anova_tables
+```
+
+These are all highly significant. Let's focus on proportion of variance, and variance reduction by the HFA
+
+```{r}
+variance_table = sapply(race, function(x) {
+  min_aic = min_aic[x]
+  av = anova_out[[x]][[min_aic]] %>% 
+    get_ss
+  out = av[, 'Proportion.of.Variance'] %>% 
+    set_names(av[, 'Predictor'])
+})
+ge_reduction = variance_table['is_home', ] %>% 
+  divide_by(colSums(rbind(variance_table['is_home',], variance_table['Residuals', ]))) %>% 
+  round(4) %>% 
+  multiply_by(100)
+variance_table %<>% rbind(GxE.Reduction=ge_reduction)
+  
+rownames(variance_table) %<>% prettynames[.]
+variance_table %<>% .[prettynames, ]
+  
+variance_table
+```
+```{r}
+tab2_export = data.frame(
+  'X' = rownames(variance_table) %>% 
+    gsub('GxE.Reduction', 'Residual Reduction', .),
+  variance_table/100
+)
+colnames(tab2_export) %<>% gsub('\\.', ' ', .)
+tab2_export %<>%
+  set_colnames(., gsub('X', ' ', colnames(.))) %>% 
+  set_rownames(NULL) %>% 
+  gt(rowname_col='Source') %>% 
+  fmt_percent(columns=colnames(variance_table), decimals=1) %>% 
+  tab_header(title="Table 2",
+             subtitle="Partitioning of CDBN Yield Variances") %>% 
+  tab_spanner("Race", columns=colnames(variance_table)) %>% 
+  tab_footnote(footnote="Proportion of residual variance explained by home site",
+               locations=cells_body(columns=1, rows=7))  %>% 
+  opt_align_table_header(align='left') %>% 
+  cols_align('right',
+             columns=' ')
+  
+tab2_export
+```
+
+
+
+#### Export Table 2
+```{r}
+if (export) {
+  "Table 2 - Variance Partitioning.csv" %>% 
+    here(out_dir, .) %>% 
+    write.csv(variance_table, .)
+  
+  "Table 2 - Variance Partitioning.html" %>% 
+    here(out_dir, .) %>% 
+    gtsave(tab2_export, .)
+}
+```
+
+
+## Permute
+Significance and magnitude of home field advantage is difficult to assess using regular ANOVA and linear modeling because it's tautologically defined - we're picking the top sites, and testing if they're good. Really, we need to know if these top sites are better than expected based on chance. This is a permutation question
+
+The algorithm is:
+1. Permute relative yield within site-year
+2. Reassign home based on relative yields
+3. Calculate the coefficients for residuals ~ genotype + is_home
+4. Extract the is_home coefficient
+5. Compare to the observed with a two-tailed test.
+
+For computational efficiency, we'll also pre-partial site-year effects from the phenotype, and permute those in parallel with within-site-year relative effects. This works because these site-year effects are the same for each permutation due to permutation structure.
+
+### Population Level
+set this up to cache manually. Pretty slow.
+```{r cache=TRUE}
+hfa_rdata = "Population_HFA_Permutation.Rdata" %>% 
+  here(out_dir, .)
+run_permutation = !(file.exists(hfa_rdata))
+# run_permutation = TRUE  # for overriding
+
+if (run_permutation) {
+  population_hfa = permute_hfa(df, level='population', 
+                               site, year, geno, pheno, popn, 
+                               times=999, seed=seed)
+}
+```
+
+
+```{r}
+if (run_permutation) {
+  save(population_hfa, file=hfa_rdata)
+} else {
+  load(hfa_rdata)
+}
+
+cbind(observed = population_hfa$perms[, 1], 
+      expected = population_hfa$perms[, 1] - population_hfa$home_field[, 'median'],
+      population_hfa$home_field)
+```
+
+Andean HFA was not larger than expected by chance. Durango and Mesoamerican lines both received more HFA benefit than expected. 
+
+These yield benefits in terms of percent mean yield:
+```{r}
+exp_yield = subset(interxn, term=='(Intercept)', select=c('popn', 'estimate')) %>% 
+  set_rownames(.[, 'popn'])
+exp_yield [, 'popn'] = NULL
+
+population_hfa$perms[, 1]/exp_yield
+```
+
+Yield benefits in terms of annual yield gains:
+```{r}
+yield_gain = subset(interxn, 
+                    term=='Year_Num', 
+                    select=c('popn', 'estimate')) %>% 
+  set_rownames(.[, 'popn'])
+yield_gain[, 'popn'] = NULL
+
+population_hfa$perms[, 1]/yield_gain
+```
+
+
+
+Does this change across time?
+
+```{r}
+temp_hfa = temporal_hfa(df, site, year, geno, pheno, popn)
+```
+
+### Table S3: HFA ~ Time Anova
+```{r}
+temp_hfa$anova
+```
+Year matters for some races
+
+```{r}
+tabs3_data = temp_hfa$anova
+rownames(tabs3_data) %<>%
+  gsub('_num', '', .) %>% 
+  gsub('\\:', '*', .)
+tabs3 = tabs3_data %<>%
+  data.frame(X = rownames(.),
+             .) %>% 
+  set_colnames(c(' ', colnames(tabs3_data))) %>% 
+  gt %>% 
+  fmt_number(columns=c('Sum Sq'), n_sigfig=4) %>% 
+  fmt_number(columns='F value', decimals=2) %>% 
+  fmt_number(columns='Pr(>F)', decimals=3) %>% 
+  fmt_missing(columns=c(4, 5), missing_text='-') %>% 
+  tab_header('Table S3',
+             subtitle='ANOVA of Home Field Advantage Across Time') %>% 
+  opt_align_table_header(align='left') %>% 
+  cols_align('right',
+             columns=' ')
+  
+tabs3
+```
+
+
+#### Export Table S3
+```{r}
+if (export) {
+  "Table S3 - HFA Across Time ANOVA.csv" %>% 
+    here(out_dir, .) %>% 
+    write.csv(tabs3_data, .)
+  
+  "Table S3 - HFA Across Time ANOVA.html" %>% 
+    here(out_dir, .) %>% 
+    gtsave(tabs3, .)
+}
+```
+
+
+```{r}
+temp_hfa$model %>% summary
+```
+Specifically, Mesoamerican HFA decreases over time. Durango isn't separable from Andean, though it might change independently. 
+
+### Figure 2b: HFA ~ Time | Race
+First generate the supplementary datasets
+```{r}
+thfa_df = temp_hfa$temporal_hfa
+# format x axis
+year_num = paste0(year, '_num')
+year_num0 = gsub('num', 'num0', year_num)
+
+thfa_df[, year_num0] = thfa_df[, year_num] - min(thfa_df[, year_num])
+
+xstep = 10
+xrange = thfa_df[, year_num] %>% 
+  range
+xmin = xrange[1] %>% 
+  divide_by(xstep) %>% 
+  floor %>% 
+  multiply_by(xstep)
+xmax = xrange[2]
+xbreaks = seq(xmin, xmax, by=xstep)
+xbreaks_minor = xbreaks + (xstep/2)
+
+# generate formula annotations for each model
+ff = temp_hfa$formulas$anova %>% 
+  gsub('\\*', '', .) %>% 
+  gsub(popn, '', .) %>%
+  gsub(year_num, year_num0, .) %>% 
+  formula
+annotate = split(thfa_df, thfa_df[, popn]) %>% 
+  sapply(function(x) {
+    mod = lm(ff, data=x) %>% 
+      summary %>% 
+      coef
+    p_val = mod[2, 4]
+    if (p_val <= 0.05) {
+      f1 = paste('italic(y)==', 
+                 signif(mod[1, 1], 3), '~+~', 
+                 signif(mod[2, 1], 3), '~italic(x)', 
+                 sep='') 
+      f2 = ifelse(p_val < 0.001,
+                  'italic(p)~<~0.001',
+                  paste('italic(p)==', signif(p_val, 1)))
+      out = paste('list(', f1, ',', f2, ')', sep='')
+    } else {
+      out = 'n.s.' 
+    }
+    return(out)
+  })
+annotate =
+  data.frame(popn = names(annotate),
+             text = annotate,
+             x = 1980,
+             y = 1300)
+names(annotate) %<>% 
+  gsub('popn', popn, .)
+
+# generate ribbons for expected values
+exp_hfa = population_hfa$perms %>% 
+  .[, -c(1)] %>% 
+  apply(1, function(x) {
+    c(p50 = median(x),
+      p05 = quantile(x, 0.05) %>% set_names(NULL),
+      p95 = quantile(x, 0.95) %>% set_names(NULL))
+  }) %>% 
+  t
+exp_hfa %<>% data.frame(
+  popn = rownames(.),
+  .
+) %>% 
+  set_rownames(NULL) %>% 
+  rbind(., .)
+exp_hfa$x_val = c(
+  rep(xrange[1], nrow(exp_hfa)/2),
+  rep(xrange[2], nrow(exp_hfa)/2)
+)
+names(exp_hfa) %<>% gsub('popn', popn, .)
+```
+
+
+```{r fig.height=3, fig.width=6.5}
+thfa_df %<>% .[, c(paste0(year, '_num'), 
+                   paste0(year, '_num0'),
+                   'Estimate', popn, 'Std.Error')]
+thfa_plot = thfa_df %>% 
+  ggplot(aes_string(x=paste0(year, '_num'),
+                    y='Estimate',
+                    color=popn,
+                    fill=popn,
+                    grp.label=popn)) +
+  facet_wrap(paste('~', popn) %>% formula,
+             nrow=1) +
+  scale_color_manual(values=colors, guide=NULL) +
+  scale_fill_manual(values=colors, guide=NULL) +
+  scale_x_continuous(breaks=xbreaks, minor_breaks=xbreaks_minor) +
+  geom_hline(aes(yintercept=0),
+             size=0.2,
+             color='gray') +
+  geom_ribbon(data=exp_hfa,
+              aes_string(ymin='p05',
+                         ymax='p95',
+                         x='x_val'),
+              fill='#EEEEEE',
+              alpha=1,
+              inherit.aes=FALSE) +
+  geom_pointrange(aes(ymin=Estimate - Std.Error,
+                      ymax=Estimate + Std.Error),
+                  shape=20,
+                  size=0.2) +
+  geom_smooth(method='lm',
+              formula=y~x,
+              alpha=0.1,
+              size=0.2,
+              level=0.95,
+              fullrange=TRUE) +
+  geom_text(data=annotate,
+            aes(x=x,
+                y=y,
+                label=text),
+            color='black',
+            hjust='inward',
+            vjust='inward',
+            parse=TRUE,
+            size=3) +
+  labs(x='Year',
+       y='Home Field Advantage [kg/ha]',
+       color=NULL) +
+  theme_minimal() +
+  theme(panel.grid=element_blank(),
+        axis.title=element_text(size=9),
+        axis.ticks=element_line(color='gray',
+                                size=0.2))
+thfa_plot
+```
+
+```{r}
+split(thfa_df, thfa_df[, popn]) %>% 
+  lapply(function(x) {
+    mod = lm(ff, data=x) %>% 
+      summary %>% 
+      coef
+    mod})
+```
+
+#### Export Data
+```{r}
+if (export) {
+  here(out_dir, 'figure data', 'Fig 2b - HFA across time.csv') %>% 
+    write.csv(thfa_df, ., row.names=FALSE)
+  
+  here(out_dir, 'figure data', 'Fig 2b - HFA across time Annotations.csv') %>% 
+    write.csv(annotate, ., row.names=FALSE)
+  
+  here(out_dir, 'figure data', 'Fig 2b - HFA across time Expectation.csv') %>% 
+    write.csv(exp_hfa, ., row.names=FALSE)
+}
+```
+
+
+
+# Figure 2 Combined
+
+```{r fig.height=5, fig.width=6.5}
+fig2a = yield_yr +
+  ggtitle('A)') +
+  theme(axis.text.x = element_blank(),
+        axis.title.x = element_blank(),
+        axis.line.x=element_line(size=0.2, color='gray'),
+        plot.title=element_text(size=10),
+        strip.text=element_text(face='bold'))
+fig2b = thfa_plot +
+  ggtitle('B)') +
+  theme(strip.text=element_blank(),
+        plot.title=element_text(size=10))
+
+grid.arrange(fig2a, fig2b, nrow=2)
+```
+
+## Export Figure 2
+```{r}
+if (export) {
+  out = "Figure 2 - Yield, HFA Trends.jpg" %>% 
+    here('results', .)
+  jpeg(out, width=6.5, height=5, units='in', res=300)
+  grid.arrange(fig2a, fig2b, nrow=2)
+  dev.off()
+}
+```
+
+# Heritability
+
+## Trends across time
+```{r}
+herit_mod_ff = "Heritability ~ year*popn" %>% 
+  gsub('popn', popn, .) %>% 
+  gsub('year', year, .)
+
+herit_mod = formula(herit_mod_ff) %>% 
+  lm(data=H)
+
+Anova(herit_mod)
+```
+
+```{r}
+summary(herit_mod)
+```
+
+```{r}
+# generate formula annotations for each model
+ff = herit_mod_ff %>% 
+  gsub('\\*', '', .) %>% 
+  gsub(popn, '', .) %>%
+  gsub(year_num, year_num0, .) %>% 
+  formula
+annotate = split(H, H[, popn]) %>% 
+  sapply(function(x) {
+    mod = lm(ff, data=x) %>% 
+      summary %>% 
+      coef
+    p_val = mod[2, 4]
+    if (p_val <= 0.05) {
+      f1 = paste('italic(y)==', 
+                 signif(mod[1, 1], 3), '~+~', 
+                 signif(mod[2, 1], 3), '~italic(x)', 
+                 sep='') 
+      f2 = ifelse(p_val < 0.001,
+                  'italic(p)~<~0.001',
+                  paste('italic(p)==', signif(p_val, 1)))
+      out = paste('list(', f1, ',', f2, ')', sep='')
+    } else {
+      out = 'n.s.' 
+    }
+    return(out)
+  })
+annotate =
+  data.frame(popn = names(annotate),
+             text = annotate,
+             x = 1980,
+             y = 1300)
+names(annotate) %<>% 
+  gsub('popn', popn, .)
+```
+
+
+### Figure 3b: Heritability ~ Year | Race
+```{r}
+se_high = function(x) mean(x) + se(x)
+se_low = function(x) mean(x) - se(x)
+cat_to_num = function(x) as.numeric(as.character(x))
+
+
+# year zero for nice intercepts in the eqn
+H[, 'Y0'] = H[, year] - min(H[, year])
+
+H_df = H[, c(year, 'Y0', 'Heritability', popn)]
+
+H_yr = ggplot(H_df,
+              aes_string(x='Y0',
+                         y='Heritability',
+                         color=popn,
+                         fill=popn)) +
+  facet_wrap(paste('~', popn) %>% formula,
+             nrow=1) +
+  scale_x_continuous(limits=c(0,35),
+                     breaks=seq(0, 35, by=10),
+                     labels=seq(1980, 2015, by=10)) +
+  scale_color_manual(values=colors, guide=NULL) +
+  scale_fill_manual(values=colors, guide=NULL) +
+  stat_summary(fun=mean,
+               fun.max=se_high,
+               fun.min=se_low,
+               shape=20,
+               size=0.2) +
+  geom_smooth(method='lm',
+              formula=y~x,
+              alpha=0.1,
+              size=0.2,
+              fullrange=TRUE,
+              level=0.95) +
+  stat_poly_eq(
+    aes(label=paste('list(',
+                    stat(eq.label),
+                    ',italic(p) < 0.001)',
+                    sep="")),
+    formula=y~x,
+    parse=TRUE,
+    label.y.npc=0.9,
+    size=3,
+    color='black'
+  ) +
+  labs(x = 'Year',
+       y = 'Yield Heritability [au]',
+       color=NULL,
+       fill=NULL) +
+  theme_minimal() +
+  theme(panel.grid=element_blank(),
+        axis.ticks=element_line(color='gray',
+                                size=0.2),
+        axis.title=element_text(size=9))
+```
+
+```{r fig.height=2.5, fig.width=6.5}
+H_yr
+```
+
+#### Export Figure 3b
+```{r}
+H_yr = H_yr + 
+  ggtitle('B)') + 
+  theme(plot.title=element_text(size=10))
+
+if (export) {
+  "Figure 3b - Heritability vs Time.jpg" %>% 
+    here(out_dir, .) %>% 
+    jpeg(width=6.5, height=2.5, units='in', res=300)
+  grid.arrange(H_yr)
+  dev.off()
+  
+  here('results', 'figure data', 'Fig 3b - heritability vs year.csv') %>% 
+    write.csv(H_df, ., row.names=FALSE)
+}
+```
+
+## Relationship with years in dataset, site variation in heritability, race yield
+### Figure S1A: sd(H2) ~ Years at each site
+```{r}
+site_years = df[, c(year, site)] %>% 
+  unique %>% 
+  na.omit %>% 
+  {tapply(.[, year], .[, site], length)}
+
+
+
+sd_H = tapply(H[, 'Heritability'], H[, site], sd, na.rm=TRUE)
+mean_H = tapply(H[, 'Heritability'], H[, site], mean, na.rm=TRUE)
+
+H_stats = data.frame(site = rownames(site_years),
+                     site_year = site_years,
+                     sd_H = sd_H[rownames(site_years)],
+                     mean_H = mean_H[rownames(site_years)])
+```
+
+```{r}
+sd_H_mod = "sd_H ~ site_year" %>% 
+  formula %>% 
+  lm(data=H_stats)
+Anova(sd_H_mod)
+```
+```{r}
+summary(sd_H_mod)
+```
+
+```{r}
+p_val_sd_H = Anova(sd_H_mod)[1, 4] %>% 
+  signif(2)
+
+sd_H_plt = ggplot(H_stats,
+                  aes_string(x='site_year',
+                             y='sd_H')) +
+  geom_point(size=0.5) +
+  geom_smooth(method='lm',
+              formula='y~x',
+              alpha=0.2,
+              size=0.2,
+              color='darkgray',
+              fill='lightgray') +
+  stat_poly_eq(
+    aes(label=paste('atop(',
+                    stat(eq.label),
+                    ',italic(p) == ', p_val_sd_H, ')',
+                    sep="")),
+    formula=y~x,
+    parse=TRUE,
+    label.y.npc=0.0,
+    label.x.npc=0.9, 
+    size=3,
+    color='black'
+  ) +
+  labs(x='Year  at Location',
+       y='Heritability Standard Deviation')
+
+sd_H_plt %<>% 
+  gg_themer
+
+sd_H_plt
+```
+
+### Figure S1b: H2 ~ SD(H2)
+```{r}
+mean_H_mod = "mean_H ~ sd_H" %>% 
+  formula %>% 
+  lm(data=H_stats)
+```
+
+```{r}
+Anova(mean_H_mod)
+```
+
+```{r}
+label_df = data.frame(x=0.35,
+                      y=0.05,
+                      label='n.s.')
+mean_H_plt = ggplot(H_stats,
+                  aes_string(x='sd_H',
+                             y='mean_H')) +
+  geom_point(size=0.5) +
+  geom_text(data=label_df,
+            aes(x=x,
+                y=y,
+                label=label),
+            size=3,
+            color='black',
+            inherit.aes=FALSE) +
+  labs(x='Heritability Standard Deviation',
+       y='Mean Heritability')
+
+mean_H_plt %<>% 
+  gg_themer
+
+mean_H_plt
+```
+
+### Figure S1c: yield ~ H | Race
+```{r}
+site_yield = "pheno ~ site*popn" %>% 
+  gsub('pheno', pheno, .) %>% 
+  gsub('site', site, .) %>% 
+  gsub('popn', popn, .) %>% 
+  formula %>% 
+  aggregate(data=df, mean)
+
+site_H = "Heritability ~ site*popn" %>% 
+  gsub('site', site, .) %>% 
+  gsub('popn', popn, .) %>% 
+  formula %>% 
+  aggregate(data=H, mean)
+
+yield_H = merge(site_yield, site_H, by=c(site, popn))
+```
+
+```{r}
+yield_H_mod = "pheno ~ Heritability*popn" %>% 
+  gsub('pheno', pheno, .) %>% 
+  gsub('popn', popn, .) %>% 
+  formula %>% 
+  lm(data=yield_H)
+Anova(yield_H_mod)
+```
+
+```{r}
+yield_H_mod = "pheno ~ Heritability + popn" %>% 
+  gsub('pheno', pheno, .) %>% 
+  gsub('popn', popn, .) %>% 
+  formula %>% 
+  lm(data=yield_H)
+Anova(yield_H_mod)
+```
+
+```{r}
+summary(yield_H_mod)
+```
+
+
+```{r}
+p_val_yield_H = Anova(yield_H_mod)[1, 4] %>% 
+  signif(2)
+yield_H_plt = ggplot(data=yield_H,
+                     aes_string(x='Heritability',
+                                y=pheno)) +
+  scale_color_manual(values=colors) +
+  scale_fill_manual(values=colors, guide=NULL) +
+  geom_point(aes_string(color=popn),
+             size=0.5) +
+  geom_smooth(aes_string(x='Heritability',
+                        y=pheno),
+              method='lm',
+              formula='y~x',
+              color='darkgray',
+              fill='lightgray',
+              alpha=0.2,
+              size=0.2) +
+  stat_poly_eq(
+    aes(label=paste('atop(',
+                    stat(eq.label),
+                    ',italic(p) == ', p_val_yield_H, ')',
+                    sep="")),
+    formula=y~x,
+    parse=TRUE,
+    label.y.npc=0,
+    label.x.npc=0.95, 
+    size=3,
+    color='black'
+  ) +
+  labs(x='Heritability',
+       y='Mean Yield [kg/ha]',
+       color=NULL) 
+
+yield_H_plt %<>% gg_themer
+
+yield_H_plt
+```
+
+### Combine
+```{r fig.height=5, fig.width=4.5}
+grid.arrange(grobs=list(sd_H_plt, mean_H_plt, yield_H_plt),
+             widths=c(1,2,2,1),
+             layout_matrix=rbind(c(1,1,2,2),
+                                 c(3,3,3,NA))
+)
+```
+
+
+#### Export Figure S1
+```{r}
+if (export) {
+  "Figure S1 - Heritability Statistics and Relationships.jpg" %>% 
+    here(out_dir, .) %>% 
+    jpeg(width=4.5, height=5, units='in', res=300)
+  grid.arrange(grobs=list(sd_H_plt, mean_H_plt, yield_H_plt),
+             widths=c(1,2,2,1),
+             layout_matrix=rbind(c(1,1,2,2),
+                                 c(3,3,3,NA))
+  )
+  dev.off()
+  
+  here(out_dir, 'figure data', 'Fig S1 - Heritability Site Statistics.csv') %>% 
+    write.csv(H_stats, ., row.names=FALSE)
+  here(out_dir, 'figure data', 'Fig S1 - Heritability vs Yield.csv') %>% 
+    write.csv(yield_H, ., row.names=FALSE)
+}
+```
+
+
+# Home Location, Heritability, and Kinship
+Efficiently breeding for environmental specialization requires high yield gains from specialization, a genetic basis for specialization, and high heritability in yields.
+
+## Home site distance vs kinship
+To infer a genetic basis, we correlated genetic distance with home site distance.
+
+Again, we'll use the first 3 PCs. 
+
+```{r}
+n_PC = n_PC  
+# defined above in 
+#    Home Field Advantage -> Estimate -> 
+#       Models, Parameters, and Output Objects.
+
+home_site_dist = measure_home_distance(df, locations, 
+                                       geno, site, lat, long, 
+                                       great_circle=TRUE)
+
+# reconstruct LD-corrected distance from PCs
+genetic_dist = lapply(PCs, function(x) {
+  rownames(x) = x[, geno]
+  x[, geno] = NULL
+  out = dist(x[, 1:n_PC]) %>% 
+    as.matrix
+  return(out)
+})
+```
+
+```{r}
+# uses vegan::mantel
+home_genetic_corr = lapply(genetic_dist, function(x) {
+  home_dist = home_site_dist[rownames(x), colnames(x)]
+  out = mantel(home_dist, x)
+})
+
+home_genetic_corr
+```
+### FIGURE 4b: Home ~ Genetic Distance | Race
+```{r}
+dist_to_df = function(x) {
+  diag(x) = NA
+  x[upper.tri(x)] = NA
+  
+  out = data.frame(A = c(row(x)),
+                 B = c(col(x)),
+                 distance = c(x))
+  out %<>% na.omit
+  
+  out[, 'A'] %<>% rownames(x)[.]
+  out[, 'B'] %<>% colnames(x)[.]
+  return(out)
+}
+
+dist_df = lapply(genetic_dist, function(x) {
+  home_dist = home_site_dist[rownames(x), colnames(x)] %>% 
+    dist_to_df %>% 
+    set_colnames(c('A', 'B', 'home_distance'))
+  
+  gen_dist = dist_to_df(x) %>% 
+    set_colnames(c('A', 'B', 'genetic_distance'))
+  
+  out = merge(home_dist, gen_dist, by=c('A', 'B'))
+  
+  return(out)
+})
+
+dist_df %<>% 
+  names %>% 
+  lapply(function(x) {
+    out = data.frame(
+      popn = x,
+      dist_df[[x]]
+    )
+    names(out) %<>% gsub('popn', popn, .)
+    return(out)
+  }) %>% 
+  do.call(rbind, .)
+
+dist_annotate =
+  data.frame(popn = names(home_genetic_corr),
+             signif = sapply(home_genetic_corr, '[[', 'signif'),
+             corr = sapply(home_genetic_corr, '[[', 'statistic'),
+             x = 0,
+             y = 3800)
+colnames(dist_annotate) %<>% gsub('popn', popn, .)
+dist_annotate$text = 
+  with(dist_annotate, 
+       paste("list(Mantel~italic(r)==", 
+             round(corr, 3), 
+             ', italic(p)==', 
+             signif(signif, 2), 
+             ')',
+             sep='')
+)
+is_signif = dist_annotate$signif <= 0.05
+dist_annotate[!is_signif, 'text'] = 'n.s.'
+
+
+```
+
+```{r fig.height=2.5, fig.width=6.5}
+home_genetic_plot = dist_df %>% 
+  ggplot(aes_string(x='genetic_distance',
+                    y='home_distance',
+                    color=popn)) +
+  scale_color_manual(values=colors, guide=NULL) +
+  facet_wrap(paste('~', popn) %>% formula) +
+  geom_point(alpha=0.1,
+             size=0.2) +
+  geom_smooth(method='lm',
+              formula='y~x',
+              alpha=0.2,
+              color='black',
+              size=0.2,
+              level=0.95) +
+  geom_text(data=dist_annotate,
+             aes(x=x,
+                 y=y,
+                 label=text),
+            color='black',
+            hjust='inward',
+            vjust='inward',
+             parse=TRUE,
+            size=3) +
+  labs(x='Genetic Distance [au]',
+       y='Home Distance [km]') +
+  theme_minimal() +
+  theme(panel.grid=element_blank(),
+        axis.ticks=element_line(color='gray',
+                                size=0.2),
+        axis.title=element_text(size=9))
+home_genetic_plot
+```
+For breeding purposes, environmental specialization must have a predictable genetic basis. In support of this requirement, varieties that were more closely related also had home sites that were closer. 
+
+
+## HFA vs Heritability
+HFA and heritability patterns inform breeding strategies (per Table 1)
+
+
+To calculate site HFA:
+
+1. Calculate HFA for each genotype
+2. Average these HFAs by home site ID
+
+```{r}
+# identify HFA conferred to varieties
+geno_hfa = permute_hfa(df, level='genotype', site, year, geno, pheno, popn, times=1,
+                       seed=seed)
+
+geno_hfa %<>%
+  extract2('perms') %>% 
+  lapply(function(x) x[, 'observed']) %>% 
+  unlist
+
+geno_hfa_names = 
+  names(geno_hfa) %>% 
+  strsplit('\\.') %>% 
+  do.call(rbind, .) %>% 
+  gsub(site, '', .) %>% 
+  set_colnames(c(popn, geno))
+
+geno_hfa %<>% data.frame(
+  geno_hfa_names,
+  HFA = .
+) %>% 
+  set_rownames(NULL)
+
+geno_homes = subset(df, is_home, select=c(geno, popn, site)) %>% 
+  unique
+
+# Calculate mean HFA by site
+site_hfa = merge(geno_hfa, geno_homes, by=c(popn, geno)) %>% # merge
+  {tapply(.[, 'HFA'], .[, c(site, popn)], mean)} %>%  # summarize
+  melt(value.name='HFA')
+
+# calculate
+site_H = tapply(H[, 'Heritability'], H[, c(site, popn)], mean, na.rm=TRUE) %>%
+  melt(value.name='H')
+
+site_H_HFA = merge(site_hfa, site_H, by=c(site, popn))
+```
+
+
+### Figure 4a: HFA vs Heritability
+```{r fig.height=2.5, fig.width=6.5}
+annotater = data.frame(label=c('II', 'I', 'III', 'IV') %>% 
+                         paste('bold(', ., ')', sep=''),
+                       x=c(0.05, 0.95, 0.05, 0.95),
+                       y=c(1400, 1400, 0, 0))
+
+medians=c(H = median(site_H_HFA$H, na.rm=TRUE),
+          HFA = median(site_H_HFA$HFA, na.rm=TRUE))
+
+site_hfa_plot = 
+  ggplot(site_H_HFA, 
+         aes_string(x='H',
+                    y='HFA',
+                    color=popn)) +
+  scale_color_manual(values=colors, guide=NULL) +
+  facet_wrap(paste('~', popn) %>% formula,
+             nrow=1) +
+  geom_vline(aes(xintercept=medians['H']),
+             color='gray',
+             size=0.2) +
+  geom_hline(aes(yintercept=medians['HFA']),
+             color='gray',
+             size=0.2) +
+  geom_point(size=0.5) +
+  geom_text(data=annotater,
+            aes(label=label,
+                x=x,
+                y=y),
+            hjust='inward',
+            vjust='inward',
+            size=3,
+            inherit.aes=FALSE,
+            parse=TRUE) +
+  theme_minimal() +
+  labs(x='Heritability',
+       y='Home Field Advantage [kg/ha]') +
+  theme(panel.grid=element_blank(),
+        axis.ticks=element_line(color='gray',
+                                size=0.2),
+        axis.title=element_text(size=9))
+site_hfa_plot
+```
+We are interested in those sites in Quadrant I - the ones where heritability is high, and HFA is also high. 
+
+### Fig 4b - Sites with high H2, HFA
+ID best sites
+```{r}
+best_sites = split(site_H_HFA, site_H_HFA[, popn])
+
+best_sites %<>% lapply(function(x) {
+  med_H = median(x$H, na.rm=TRUE)
+  med_HFA = median(x$HFA, na.rm=TRUE)
+  
+  is_topH = x$H > med_H
+  is_topHFA = x$HFA > med_HFA
+  
+  out = x[is_topH & is_topHFA, ] %>% 
+    na.omit
+  return(out)
+}) %>% 
+  do.call(rbind, .) %>% 
+  set_rownames(NULL)
+```
+
+Merge with spatial data
+```{r fig.height=2.5, fig.width=6.5}
+bs_plot = site_map[, c(site, 'Location', popn)] %>% 
+  merge(best_sites, by=c(site, popn), all.x=TRUE)
+bs_plot$plotval = 1*(!is.na(bs_plot$HFA))
+```
+
+Plot best sites for each race, single map for easy comparisons.
+```{r}
+bssp = c(site, 'Location') %>% 
+  paste(collapse='+') %>% 
+  paste(popn, sep='~') %>% 
+  formula %>% 
+  dcast(data=bs_plot, ., value.var='plotval') %>% 
+  na.omit
+
+for (i in race) {
+  bssp[, i] %<>% {.==1} %>% 
+    sapply(ifelse, substr(i, 1, 1), '-')
+}
+bssp$label = apply(bssp[, race], 1, paste, collapse='')
+bssp$label %<>% gsub('---', '', .)
+
+bssp = bs_plot[, c(site, 'Location')] %>% 
+  unique %>% 
+  merge(bssp[, c(site, 'Location', 'label')], by=c(site, 'Location'))
+
+best_sites_plot = ggplot(basemap) +
+  geom_sf(fill='white',
+          size=0.2) +
+  geom_sf_text(data=bssp,
+               aes(label=label),
+               size=3,
+               alpha=0.5,
+               color='black') +
+  theme_minimal() +
+  labs(fill=expression(paste('Mean Yield [kg ', 'ha'^-1, ']')),
+       parse=TRUE,
+       x=NULL,
+       y=NULL) +
+  theme(axis.ticks=element_line(color='gray',
+                                size=0.2),
+        axis.title=element_text(size=9),
+        legend.title=element_text(size=9),
+        panel.grid=element_line(color='gray',
+                                size=0.2),
+        legend.position='bottom')
+best_sites_plot  
+```
+
+```{r fig.height=6, fig.width=6.5}
+grid.arrange(grobs=list(site_hfa_plot, 
+                        best_sites_plot),
+             heights=c(1,2))
+```
+
+
+### Export Figure 4
+```{r}
+if (export) {
+  out = "Figure 4 - HFA vs H2.jpg" %>% 
+    here('results', .)
+  jpeg(out, 
+       width=6.5, 
+       height=6,
+       units='in', res=300)
+  grid.arrange(grobs=list(site_hfa_plot, 
+                          best_sites_plot),
+               heights=c(1,2))
+  dev.off()
+  
+  here(out_dir, 'figure data', 'Fig 4 - HFA vs H2.csv') %>% 
+    write.csv(site_H_HFA, ., row.names=FALSE)
+  
+  here(out_dir, 'figure data', 'Fig 4 - best breeding sites.gpkg') %>% 
+    st_write(bssp, ., delete_layer=export)
+}
+```
+
+
+## Fig S3 - faceted best breeding sites, with site names.
+Plot best sites on separate maps, labelled by location name
+```{r fig.height=2.5, fig.width=6.5}
+bs_plot$label = apply(bs_plot, 1, function(x) ifelse(x['plotval']==1, x[site], ''))
+
+best_sites_facet_plot = ggplot(basemap) +
+  facet_wrap(paste('~', popn) %>% formula,
+             nrow=1) +
+  scale_color_manual(values=colors, guide=NULL) +
+  geom_sf(fill='white',
+          size=0.2) +
+  geom_sf_text(data=bs_plot,
+               aes_string(label='label',
+                          color=popn),
+               size=3) +
+  theme_minimal() +
+  labs(fill=expression(paste('Mean Yield [kg ', 'ha'^-1, ']')),
+       parse=TRUE,
+       x=NULL,
+       y=NULL) +
+  theme(axis.ticks=element_line(color='gray',
+                                size=0.2),
+        axis.title=element_text(size=9),
+        legend.title=element_text(size=9),
+        panel.grid=element_line(color='gray',
+                                size=0.2),
+        legend.position='bottom')
+best_sites_facet_plot  
+```
+
+### Export Figure S3
+```{r}
+if (export) {
+ out = "Figure S3 - Best Breeding Sites by Race.jpg" %>% 
+    here('results', .)
+  jpeg(out, 
+       width=6.5, 
+       height=2.5,
+       units='in', res=300)
+  grid.arrange(best_sites_facet_plot)
+  dev.off()
+
+  here(out_dir, 'figure data', 'Fig S3 - faceted best breeding sites.gpkg') %>% 
+    st_write(bs_plot, ., delete_layer=export)
+}
+```
+
