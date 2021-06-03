@@ -104,6 +104,8 @@ libs = c(
   'ggplot2', 
   'ggpmisc',
   'gridExtra',
+  'ggtext',
+  'glue',
 ## tables
   'gt',          
 ## Spatial/mapping
@@ -1001,7 +1003,7 @@ Does this change across time?
 temp_hfa = temporal_hfa(df, site, year, geno, pheno, popn)
 ```
 
-### Table S3: HFA ~ Time Anova
+### TABLE S3: HFA ~ Time Anova
 ```{r}
 temp_hfa$anova
 ```
@@ -1050,7 +1052,7 @@ temp_hfa$model %>% summary
 ```
 Specifically, Mesoamerican HFA decreases over time. Durango isn't separable from Andean, though it might change independently. 
 
-### Figure 2b: HFA ~ Time | Race
+### FIGURE 2b: HFA ~ Time | Race
 First generate the supplementary datasets
 ```{r}
 thfa_df = temp_hfa$temporal_hfa
@@ -1208,7 +1210,7 @@ if (export) {
 
 
 
-# Figure 2 Combined
+## FIGURE 2 Combined
 
 ```{r fig.height=5, fig.width=6.5}
 fig2a = yield_yr +
@@ -1292,7 +1294,7 @@ names(annotate) %<>%
 ```
 
 
-### Figure 3b: Heritability ~ Year | Race
+### FIGURE 3b: Heritability ~ Year | Race
 ```{r}
 se_high = function(x) mean(x) + se(x)
 se_low = function(x) mean(x) - se(x)
@@ -1372,7 +1374,7 @@ if (export) {
 ```
 
 ## Relationship with years in dataset, site variation in heritability, race yield
-### Figure S1A: sd(H2) ~ Years at each site
+### FIGURE S1A: sd(H2) ~ Years at each site
 ```{r}
 site_years = df[, c(year, site)] %>% 
   unique %>% 
@@ -1435,7 +1437,7 @@ sd_H_plt %<>%
 sd_H_plt
 ```
 
-### Figure S1b: H2 ~ SD(H2)
+### FIGURE S1b: H2 ~ SD(H2)
 ```{r}
 mean_H_mod = "mean_H ~ sd_H" %>% 
   formula %>% 
@@ -1470,7 +1472,7 @@ mean_H_plt %<>%
 mean_H_plt
 ```
 
-### Figure S1c: yield ~ H | Race
+### FIGURE S1c: yield ~ H | Race
 ```{r}
 site_yield = "pheno ~ site*popn" %>% 
   gsub('pheno', pheno, .) %>% 
@@ -1560,7 +1562,7 @@ grid.arrange(grobs=list(sd_H_plt, mean_H_plt, yield_H_plt),
 ```
 
 
-#### Export Figure S1
+#### Export FIGURE S1
 ```{r}
 if (export) {
   "Figure S1 - Heritability Statistics and Relationships.jpg" %>% 
@@ -1618,7 +1620,7 @@ home_genetic_corr = lapply(genetic_dist, function(x) {
 
 home_genetic_corr
 ```
-### FIGURE 4b: Home ~ Genetic Distance | Race
+### FIGURE N.S.: Home ~ Genetic Distance | Race
 ```{r}
 dist_to_df = function(x) {
   diag(x) = NA
@@ -1765,7 +1767,7 @@ site_H_HFA = merge(site_hfa, site_H, by=c(site, popn))
 ```
 
 
-### Figure 4a: HFA vs Heritability
+### FIGURE 4a: HFA vs Heritability
 ```{r fig.height=2.5, fig.width=6.5}
 annotater = data.frame(label=c('II', 'I', 'III', 'IV') %>% 
                          paste('bold(', ., ')', sep=''),
@@ -1810,7 +1812,7 @@ site_hfa_plot
 ```
 We are interested in those sites in Quadrant I - the ones where heritability is high, and HFA is also high. 
 
-### Fig 4b - Sites with high H2, HFA
+### FIGURE 4b - Sites with high H2, HFA
 ID best sites
 ```{r}
 best_sites = split(site_H_HFA, site_H_HFA[, popn])
@@ -1837,7 +1839,7 @@ bs_plot = site_map[, c(site, 'Location', popn)] %>%
 bs_plot$plotval = 1*(!is.na(bs_plot$HFA))
 ```
 
-Plot best sites for each race, single map for easy comparisons.
+Plot best sites for each race, single map for easy comparisons. Begin by making the basic dataframe
 ```{r}
 bssp = c(site, 'Location') %>% 
   paste(collapse='+') %>% 
@@ -1856,15 +1858,46 @@ bssp$label %<>% gsub('---', '', .)
 bssp = bs_plot[, c(site, 'Location')] %>% 
   unique %>% 
   merge(bssp[, c(site, 'Location', 'label')], by=c(site, 'Location'))
+```
+
+Now do some wizardry with ggtext to colorcode letters.
+```{r}
+hex_colors = colors[seq_len(length(race))]
+
+text_colors = function(x, colors) {
+  single_characters = strsplit(as.character(x), NULL) %>% # splits into individual characters of each string
+    sapply(function(y) {
+      if (length(y) == length(colors)) {
+        out = glue("<span style='color:{colors}'>**{y}**</span>") %>% 
+          paste(collapse='')
+      } else {
+        out = '<span></span>'
+      }
+      return(out)
+    })
+  return(single_characters)
+}
+
+bssp$color_label = text_colors(bssp$label, hex_colors) %>% 
+  gsub('\\*\\*-\\*\\*', ' ', .)
+bssp$x = bssp$geom %>% 
+  sapply('[', 1)
+bssp$y = bssp$geom %>% 
+  sapply('[', 2)
+
 
 best_sites_plot = ggplot(basemap) +
   geom_sf(fill='white',
           size=0.2) +
-  geom_sf_text(data=bssp,
-               aes(label=label),
+  geom_richtext(data=bssp,
+               aes(x=x,
+                   y=y,
+                   label=color_label),
                size=3,
                alpha=0.5,
-               color='black') +
+               color='black',
+               fill=NA,
+               label.color=NA) +
   theme_minimal() +
   labs(fill=expression(paste('Mean Yield [kg ', 'ha'^-1, ']')),
        parse=TRUE,
@@ -1881,8 +1914,15 @@ best_sites_plot
 ```
 
 ```{r fig.height=6, fig.width=6.5}
-grid.arrange(grobs=list(site_hfa_plot, 
-                        best_sites_plot),
+p1 = site_hfa_plot +
+  ggtitle('A)') +
+  theme(plot.title=element_text(size=10))
+p2 = best_sites_plot +
+  ggtitle('\nB)') +
+  theme(plot.title=element_text(size=10,
+                                hjust=-0.15))
+
+grid.arrange(grobs=list(p1, p2),
              heights=c(1,2))
 ```
 
@@ -1896,8 +1936,7 @@ if (export) {
        width=6.5, 
        height=6,
        units='in', res=300)
-  grid.arrange(grobs=list(site_hfa_plot, 
-                          best_sites_plot),
+  grid.arrange(grobs=list(p1, p2),
                heights=c(1,2))
   dev.off()
   

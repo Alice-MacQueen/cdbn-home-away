@@ -6,6 +6,7 @@ library(gridExtra)
 library(magrittr)
 library(wesanderson)
 library(sf)
+library(ggtext)
 
 popn = 'Race'
 colors = wes_palette('FantasticFox1')
@@ -58,17 +59,49 @@ site_hfa_plot =
         axis.title=element_text(size=9))
 site_hfa_plot
 
+# colors = wes_palettes[['FantasticFox1']][1:3]
+# 
+# color_labels = bssp$label
+# 
+# make_colors = function(x, colors) {
+#   single_characters = strsplit(as.character(x), NULL) %>% # splits into individual characters of each string
+#     sapply(function(y) {
+#       if (length(y) == length(colors)) {
+#         out = glue("<span style='color:{colors}'>**{y}**</span>") %>% 
+#           paste(collapse='')
+#       } else {
+#         out = '<span></span>'
+#       }
+#       return(out)
+#     })
+#   return(single_characters)
+# }
+# 
+# bssp$color_label = make_colors(bssp$label, colors) %>% 
+#   gsub('\\*\\*-\\*\\*', ' ', .)
+# bssp$x = bssp$geom %>% 
+#   sapply('[', 1)
+# bssp$y = bssp$geom %>% 
+#   sapply('[', 2)
+
+
 best_sites_plot = ggplot(basemap) +
   geom_sf(fill='white',
           size=0.2) +
-  geom_sf_text(data=bssp,
-               aes(label=label),
+  geom_richtext(data=bssp,
+               aes(x=x,
+                   y=y,
+                   label=color_label),
                size=3,
                alpha=0.5,
-               color='black') +
+               color='black',
+               fill=NA,
+               label.color=NA) +
   theme_minimal() +
   labs(fill=expression(paste('Mean Yield [kg ', 'ha'^-1, ']')),
-       parse=TRUE) +
+       parse=TRUE,
+       x=NULL,
+       y=NULL) +
   theme(axis.ticks=element_line(color='gray',
                                 size=0.2),
         axis.title=element_text(size=9),
@@ -77,13 +110,21 @@ best_sites_plot = ggplot(basemap) +
                                 size=0.2),
         legend.position='bottom')
 
+p1 = site_hfa_plot +
+  ggtitle('A)') +
+  theme(plot.title=element_text(size=10))
+p2 = best_sites_plot +
+  ggtitle('\nB)') +
+  theme(plot.title=element_text(size=10,
+                                hjust=-0.15))
+
 out = "Figure 4 - HFA vs H2.jpg" %>% 
   here('results', .)
 jpeg(out, 
      width=6.5, 
      height=6,
      units='in', res=300)
-grid.arrange(grobs=list(site_hfa_plot, 
-                        best_sites_plot),
+grid.arrange(grobs=list(p1, 
+                        p2),
              heights=c(1,2))
 dev.off()
