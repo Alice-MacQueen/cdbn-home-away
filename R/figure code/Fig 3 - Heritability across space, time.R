@@ -18,9 +18,8 @@ sites  = here(in_dir, 'Figure 1 - Yield by Site.gpkg') %>%
   st_read
 basemap =   here(in_dir, 'CDBN Basemap.gpkg') %>% 
   st_read
-H_map = here(in_dir, 'test_kriged_bean_map.tif') %>%
+H_map = here(in_dir, 'kriged_bean_heritability.tif') %>%
   read_stars(proxy=FALSE)
-st_crs(H_map) = "epsg:4326"
 
 ## Figure 3a: Heritability across space
 # buffer to crop
@@ -31,12 +30,12 @@ site_buff = sites %>%
   st_transform(st_crs(H_map))
 
 H_map %<>%
-  # st_warp(cellsize=0.1,
-  #         method='bilinear',
-  #         use_gdal=TRUE) %>%
-  st_crop(site_buff)# %>% 
-  # st_transform(st_crs(basemap))
-basemap %<>% st_transform(st_crs(H_map))
+  st_warp(cellsize=0.1,
+          method='bilinear',
+          use_gdal=TRUE) %>%
+  st_crop(site_buff) %>% 
+  st_transform(st_crs(basemap))
+# basemap %<>% st_transform(st_crs(H_map))
 
 # st_as_sf %>% 
 # set_colnames(c('value', 'geometry'))
@@ -49,7 +48,7 @@ H_space = ggplot(basemap) +
              alpha=0.8) +
   geom_sf(data=sites,
           color='black',
-          size=0.2) +
+          size=0.1) +
   labs(fill='Yield\nHeritability') +
   theme_minimal() +
   theme(axis.ticks=element_line(color='gray',
