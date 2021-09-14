@@ -720,7 +720,6 @@ dd = mclapply(race, function(x) {
 df = dd
 ```
 
-
 ### Models, Parameters, and Output Objects
 ```{r}
 n_PC = 3
@@ -1238,6 +1237,180 @@ if (export) {
   dev.off()
 }
 ```
+
+## Compare shrinkage and raw home site HFA
+ID home site with a linear model (instead of BLUP/shrinkage)
+```{r}
+df_lin = dd = mclapply(race, function(x) {
+  x = df[, popn] == x
+  x = df[x, ]
+  
+  x %<>% id_home(site, year, geno, pheno, blup=FALSE, verbose=FALSE)
+  return(x)
+  },
+  mc.cores = ncpu
+) %>% 
+  do.call(rbind, .) %>% 
+  set_rownames(NULL)
+```
+
+How many of the home sites changed, in percent?
+```{r}
+shrink_home = df[df$is_home, ]
+lin_home = df_lin[df_lin$is_home, ]
+
+homes = c('Taxa', 'Race', 'Location_code')
+homes = merge(shrink_home[, homes], lin_home[, homes], by='Taxa')
+(sum(homes$Location_code.x != homes$Location_code.y)/nrow(homes)) %>% 
+  multiply_by(100) %>% 
+  round(1)
+```
+
+What is HFA worth?
+```{r}
+process_permute = function(x, obs_name=c('BLUP', 'Linear')) {
+  obs_name = match.arg(obs_name)
+  df = x$home_field[, c('Race', 'Taxa')]
+  obs = x$perms %>% 
+    do.call(rbind, .)
+  df[, obs_name] = obs[df[, 'Taxa'], 1]
+  return(df)
+}
+
+shrink_hfa = permute_hfa(df, 
+                         level='genotype', 
+                         site, 
+                         year, 
+                         geno, 
+                         pheno, 
+                         popn, 
+                         times=1, 
+                         blup_home=TRUE) %>% 
+  process_permute(obs_name='BLUP')
+
+lin_hfa = permute_hfa(df, 
+                      level='genotype', 
+                      site, 
+                      year, 
+                      geno, 
+                      pheno, 
+                      popn, 
+                      times=1, 
+                      blup_home=FALSE) %>% 
+  process_permute(obs_name='Linear')
+```
+
+```{r}
+geno_hfa_compare = merge(shrink_hfa, lin_hfa, by=c(popn, geno))
+
+geno_hfa_compare_plt = ggplot(geno_hfa_compare,
+                              aes(x=Linear,
+                                  y=BLUP,
+                                  color=Race)) +
+  scale_color_manual(values=colors) +
+  coord_equal() +
+  geom_hline(aes(yintercept=0),
+             size=0.2,
+             color='darkgray') +
+  geom_vline(aes(xintercept=0),
+             size=0.2,
+             color='darkgray') +
+  geom_point(size=0.5) +
+  geom_smooth(aes(x=Linear,
+                  y=BLUP), 
+              inherit.aes=FALSE,
+              method='lm',
+              formula=y~x,
+              size=0.2,
+              level=0.95,
+              fullrange=TRUE,
+              alpha=0.1,
+              color='darkgray') +
+  geom_abline(aes(intercept=0,
+                  slope=1),
+              linetype='dashed',
+              size=0.2,
+              color='darkgray') +
+  labs(x='Linear HFA [kg/ha]',
+       y='BLUP HFA [kg/ha]',
+       main='HFA of Each Entry') +
+  theme_minimal() %>% 
+  gg_themer
+geno_hfa_compare_plt +
+  theme(legend.title=element_text(size=8))
+```
+
+Recreate temporal HFA graphs
+```{r}
+process_temp = function(x, obs_name=c('BLUP', 'Linear')) {
+  obs_name = match.arg(obs_name)
+  df = x$temporal_hfa[, c('Race', 'Year', 'Estimate', 'Std.Error')]
+  df$TYPE = obs_name
+  return(df)
+}
+blup_temp = temporal_hfa(df, site, year, geno, pheno, popn, blup_home=TRUE) %>% 
+  process_temp(obs_name='BLUP')
+
+lin_temp = df
+lin_temp$is_home = NULL
+lin_temp %<>% temporal_hfa(site, year, geno, pheno, popn, blup_home=FALSE) %>% 
+  process_temp(obs_name='Linear')
+```
+
+```{r}
+temp_compare = rbind(blup_temp, lin_temp)
+temp_compare$Year_Num = type.convert(temp_compare[, year])
+
+temp_compare_plt = ggplot(temp_compare,
+                          aes(x=Year_Num,
+                              # fill=Race,
+                              color=TYPE)) +
+  scale_color_manual(values=colors[c(1,3)]) +
+  facet_wrap(formula(paste('~', popn))) +
+  geom_hline(aes(yintercept=0),
+             color='darkgray',
+             size=0.2) +
+  geom_pointrange(aes(y=Estimate,
+                      ymin=Estimate - Std.Error,
+                      ymax=Estimate + Std.Error),
+                  alpha=0.5,
+                  shape=21,
+                  size=0.5,
+                  fill='gray') +
+  geom_smooth(aes(y=Estimate),
+              method='lm',
+              formula=y~x,
+              se=FALSE,
+              size=1) +
+  labs(x='Year',
+       y="Home Field Advantage",
+       color='Home ID\nMethod') +
+  theme_minimal() %>% 
+  gg_themer
+
+temp_compare_plt  +
+  theme(legend.title=element_text(size=8))
+```
+
+## Export Figure S1
+```{r fig.height=5, fig.width=6.5}
+plt1 = geno_hfa_compare_plt +
+  theme(legend.title=element_text(size=8))
+plt2 = temp_compare_plt  +
+  theme(legend.title=element_text(size=8))
+
+if (export) {
+  "Figure S1 - BLUP vs linear home site ID.jpg" %>% 
+    here(out_dir, .) %>% 
+    jpeg(width=6.5, height=5, units='in', res=300)
+  grid.arrange(grobs=list(plt1, plt2),
+               nrow=2)
+  dev.off()
+}
+grid.arrange(grobs=list(plt1, plt2),
+             nrow=2)
+```
+
 
 # Heritability
 
