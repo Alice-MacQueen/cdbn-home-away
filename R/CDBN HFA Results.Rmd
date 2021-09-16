@@ -113,7 +113,7 @@ libs = c(
   'rnaturalearth'
 )
 
-fn_path = file.path(getwd(), 'functions')
+fn_path = file.path(getwd(), 'R', 'functions')
 for (i in list.files(fn_path, full.names=TRUE)) {
   source(i)
 }
@@ -720,7 +720,6 @@ dd = mclapply(race, function(x) {
 df = dd
 ```
 
-
 ### Models, Parameters, and Output Objects
 ```{r}
 n_PC = 3
@@ -1085,7 +1084,7 @@ annotate = split(thfa_df, thfa_df[, popn]) %>%
       summary %>% 
       coef
     p_val = mod[2, 4]
-    if (p_val <= 0.05) {
+    # if (p_val <= 0.05) {
       f1 = paste('italic(y)==', 
                  signif(mod[1, 1], 3), '~+~', 
                  signif(mod[2, 1], 3), '~italic(x)', 
@@ -1094,16 +1093,16 @@ annotate = split(thfa_df, thfa_df[, popn]) %>%
                   'italic(p)~<~0.001',
                   paste('italic(p)==', signif(p_val, 1)))
       out = paste('list(', f1, ',', f2, ')', sep='')
-    } else {
-      out = 'n.s.' 
-    }
+    # } else {
+      # out = 'n.s.' 
+    # }
     return(out)
   })
 annotate =
   data.frame(popn = names(annotate),
              text = annotate,
              x = 1980,
-             y = 1300)
+             y = 1400)
 names(annotate) %<>% 
   gsub('popn', popn, .)
 
