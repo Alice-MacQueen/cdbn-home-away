@@ -1,0 +1,697 @@
+---
+title: "BLUP vs Linear HFA"
+author: "PME"
+date: "9/16/2021"
+date: "`r format(Sys.time(), '%d %B, %Y, %H:%M')`"
+knit: (function(inputFile, encoding) {
+  rmarkdown::render(inputFile, encoding=encoding, output_dir=here::here('results'))})
+output:
+  html_document:
+    toc: true
+    toc_depth: 3
+    toc_float: true
+    df_print: paged
+    code_folding: hide
+  pdf_document: default
+  word_document: default
+editor_options: 
+  chunk_output_type: inline
+---
+
+# Overview
+Comparison of BLUP (MacQueen et al, in review) and linear (Ewing et al, 2019) ways
+of identifying home sites and thereby calculating the home field advantage.
+
+Comparison will:
+a) compare HFA for each entry
+b) recreate Figure 2b from MacQueen et al (in review).
+
+## Setup
+### Paths
+```{r}
+in_dir = 'data'  # within the R project
+in_perf = 'Phenotypes_of_sequenced_individuals_home_away_analysis.csv'  # yield data
+
+out_dir = 'results'
+```
+
+
+
+### Variables
+```{r}
+# ids of columns, etc
+site = 'Location_code'  # spatial environment
+year = 'Year'           # temporal environment
+geno = 'Taxa'           # genotype
+pheno = 'SY'            # phenotype of interest = yield. Units kg/ha.
+popn = 'Race'           # population
+race = c('Durango', 'Mesoamerican', 'Nueva Granada')
+names(race) = race
+
+seed = 4456  # for permutations
+permute_times = 999
+
+color_palette='FantasticFox1'
+
+# nice names for model terms
+prettynames = c(
+  is_home = 'Home Site',
+  Residuals = 'Residuals',
+  Taxa = 'Genotype',
+  Location_code = 'Site',
+  Year = 'Year',
+  `Year:Location_code` = 'Site-Year',
+  GxE.Reduction = 'GxE.Reduction'
+)
+```
+
+#### Export?
+Export results to figures, rdata, etc?
+```{r load}
+export = FALSE
+export = TRUE
+```
+
+### Libraries and functions
+```{r libraries}
+libs = c(
+## workflow and scripting
+  'here',      
+  'magrittr', 
+  'reshape2', 
+  'broom',
+  'parallel',
+## modeling
+  'lme4',     
+  'car', 
+  'agricolae',
+  'vegan', 
+## Plotting
+  'wesanderson',
+  'ggplot2', 
+  'ggpmisc',
+  'gridExtra',
+  'ggtext',
+  'glue',
+## tables
+  'gt'
+)
+
+fn_path = file.path(getwd(), 'R', 'functions')
+for (i in list.files(fn_path, full.names=TRUE)) {
+  source(i)
+}
+
+for (i in libs) get_libraries(i)  # install if necessary
+```
+
+### Load and munge
+
+Main dataframe
+```{r}
+df = here(in_dir, in_perf) %>% 
+  read.csv(stringsAsFactors=FALSE)
+
+# Merge the Jalisco race into Durango (which is supported by genetics)
+df[, popn] %<>% gsub('Jalisco', 'Durango', .)
+
+# Rename the Nueva Granada race to Andean
+# df[, popn] %<>% gsub('Nueva Granada', 'Andean', .)
+
+# make a numeric version of year for temporal trends.
+year_num = paste(year, 'Num', sep='_')
+df[, year_num] = df[, year] - max(df[, year])
+
+# year is otherwise a factor
+df[, year] %<>% 
+  as.numeric %>% 
+  factor(., levels=sort(unique(.)))
+
+# filter siteyears
+min_siteyears = 3
+df %<>% filter_siteyears(site='Location_code',
+                         year='Year',
+                         min_times=min_siteyears)
+
+type.convert(df) %>% summary
+```
+
+Colors
+```{r}
+colors = wes_palette(color_palette)
+colors
+```
+
+
+### Notebook Functions
+```{r}
+# Pretty print values
+pp = function(x, digits=3, decimals=2) {
+  sprinter = paste('%.', decimals, 'f', sep='')
+  value = signif(x, digits)
+  out = sprintf(sprinter, value)
+  return(out)
+}
+
+# Standard Error
+se = function(x) sd(x) / sqrt(length(x))
+
+# tidy a linear model
+statsum = function(x, coef, stat=c('est', 'se', 'tstat', 'pval')) {
+  out = x[x$term==coef, ]
+  stat = switch(stat,
+                'est' = out[, 'estimate'],
+                'se' = out[, 'std.error'],
+                'tstat' = out[, 'statistic'],
+                'pval' = out[, 'p.value'])
+  return(out)
+}
+
+# munge an anova table
+get_ss = function(model) {
+  a = model
+  out = data.frame(
+    Predictor = rownames(a),
+    `Sum Squared` = a$`Sum Sq`,
+    `Proportion of Variance` = round(a$`Sum Sq` / sum(a$`Sum Sq`) *100, 2),
+    df = a$Df,
+    `F Statistic` = round(a$`F value`, 4),
+    `p Value` = signif(a$`Pr(>F)`, 3)
+  )
+  return(out)
+}
+gg_themer = function(x, remove_strip=FALSE) {
+  
+  out = x + 
+  theme_minimal() +
+  theme(panel.grid=element_blank(),
+        axis.ticks=element_line(color='gray',
+                                size=0.2),
+        axis.title=element_text(size=9))
+  
+  if (remove_strip) {  # for the bottom panel of fully faceted figures
+    out = out + theme(strip.text=element_blank())
+  }
+  return(out)
+}
+
+gg_mapthemer = function(x) {
+  out = x + 
+    theme_minimal() +
+    theme(axis.ticks=element_line(color='gray',
+                              size=0.2),
+      axis.title=element_text(size=9),
+      legend.title=element_text(size=9),
+      panel.grid=element_line(color='gray',
+                              size=0.2),
+      legend.position='bottom')
+  return(out)
+}
+```
+
+
+# BLUP
+Uses a mixed effects model to shrink average performance at each site for each variety toward the overal site mean. Rare sites are shrunk more agressively. This reduces noise and the influence of rare sites, balancing raw performance with our confidence in the estimate.
+```{r}
+blup_df = df
+blup_df$is_home = NULL
+pop_hfa_blup = permute_hfa(blup_df, level='population', 
+                           site, year, geno, pheno, popn, 
+                           times=permute_times, seed=seed, blup_home=TRUE)
+```
+
+
+```{r}
+cbind(observed = pop_hfa_blup$perms[, 1], 
+      expected = pop_hfa_blup$perms[, 1] - pop_hfa_blup$home_field[, 'median'],
+      pop_hfa_blup$home_field)
+```
+Andean HFA was not larger than expected by chance. Durango and Mesoamerican lines both received more HFA benefit than expected. 
+
+Does this change across time?
+
+```{r}
+temp_hfa_blup = temporal_hfa(blup_df, site, year, geno, pheno, popn, blup_home=TRUE)
+```
+
+### TABLE S3: HFA ~ Time Anova
+```{r}
+temp_hfa_blup$anova
+```
+Year matters for some races
+
+```{r}
+tabs3_data = temp_hfa_blup$anova
+rownames(tabs3_data) %<>%
+  gsub('_num', '', .) %>% 
+  gsub('\\:', '*', .)
+tabs3 = tabs3_data %<>%
+  data.frame(X = rownames(.),
+             .) %>% 
+  set_colnames(c(' ', colnames(tabs3_data))) %>% 
+  gt %>% 
+  fmt_number(columns=c('Sum Sq'), n_sigfig=4) %>% 
+  fmt_number(columns='F value', decimals=2) %>% 
+  fmt_number(columns='Pr(>F)', decimals=3) %>% 
+  fmt_missing(columns=c(4, 5), missing_text='-') %>% 
+  tab_header('Table S3 (BLUP HFA)',
+             subtitle='ANOVA of Home Field Advantage Across Time') %>% 
+  opt_align_table_header(align='left') %>% 
+  cols_align('right',
+             columns=' ')
+  
+tabs3
+```
+
+```{r}
+temp_hfa_blup$model %>% summary
+```
+
+## Plot
+First generate the supplementary datasets
+```{r}
+thfa_df = temp_hfa_blup$temporal_hfa
+# format x axis
+year_num = paste0(year, '_num')
+year_num0 = gsub('num', 'num0', year_num)
+
+thfa_df[, year_num0] = thfa_df[, year_num] - min(thfa_df[, year_num])
+
+xstep = 10
+xrange = thfa_df[, year_num] %>% 
+  range
+xmin = xrange[1] %>% 
+  divide_by(xstep) %>% 
+  floor %>% 
+  multiply_by(xstep)
+xmax = xrange[2]
+xbreaks = seq(xmin, xmax, by=xstep)
+xbreaks_minor = xbreaks + (xstep/2)
+
+# generate formula annotations for each model
+ff = temp_hfa_blup$formulas$anova %>% 
+  gsub('\\*', '', .) %>% 
+  gsub(popn, '', .) %>%
+  gsub(year_num, year_num0, .) %>% 
+  formula
+annotate = split(thfa_df, thfa_df[, popn]) %>% 
+  sapply(function(x) {
+    mod = lm(ff, data=x) %>% 
+      summary %>% 
+      coef
+    p_val = mod[2, 4]
+    # if (p_val <= 0.05) {
+      f1 = paste('italic(y)==', 
+                 signif(mod[1, 1], 3), '~+~', 
+                 signif(mod[2, 1], 3), '~italic(x)', 
+                 sep='') 
+      f2 = ifelse(p_val < 0.001,
+                  'italic(p)~<~0.001',
+                  paste('italic(p)==', signif(p_val, 1)))
+      out = paste('list(', f1, ',', f2, ')', sep='')
+    # } else {
+      # out = 'n.s.' 
+    # }
+    return(out)
+  })
+annotate =
+  data.frame(popn = names(annotate),
+             text = annotate,
+             x = 1980,
+             y = 1400)
+names(annotate) %<>% 
+  gsub('popn', popn, .)
+
+# generate ribbons for expected values
+exp_hfa = pop_hfa_blup$perms %>% 
+  .[, -c(1)] %>% 
+  apply(1, function(x) {
+    c(p50 = median(x),
+      p05 = quantile(x, 0.05) %>% set_names(NULL),
+      p95 = quantile(x, 0.95) %>% set_names(NULL))
+  }) %>% 
+  t
+exp_hfa %<>% data.frame(
+  popn = rownames(.),
+  .
+) %>% 
+  set_rownames(NULL) %>% 
+  rbind(., .)
+exp_hfa$x_val = c(
+  rep(xrange[1], nrow(exp_hfa)/2),
+  rep(xrange[2], nrow(exp_hfa)/2)
+)
+names(exp_hfa) %<>% gsub('popn', popn, .)
+```
+
+
+```{r fig.height=3, fig.width=6.5}
+thfa_df %<>% .[, c(paste0(year, '_num'), 
+                   paste0(year, '_num0'),
+                   'Estimate', popn, 'Std.Error')]
+blup_plot = thfa_df %>% 
+  ggplot(aes_string(x=paste0(year, '_num'),
+                    y='Estimate',
+                    color=popn,
+                    fill=popn,
+                    grp.label=popn)) +
+  ylim(-900, 2000) +
+  facet_wrap(paste('~', popn) %>% formula,
+             nrow=1) +
+  scale_color_manual(values=colors, guide=NULL) +
+  scale_fill_manual(values=colors, guide=NULL) +
+  scale_x_continuous(breaks=xbreaks, minor_breaks=xbreaks_minor) +
+  geom_hline(aes(yintercept=0),
+             size=0.2,
+             color='gray') +
+  geom_ribbon(data=exp_hfa,
+              aes_string(ymin='p05',
+                         ymax='p95',
+                         x='x_val'),
+              fill='#EEEEEE',
+              alpha=1,
+              inherit.aes=FALSE) +
+  geom_pointrange(aes(ymin=Estimate - Std.Error,
+                      ymax=Estimate + Std.Error),
+                  shape=20,
+                  size=0.2) +
+  geom_smooth(method='lm',
+              formula=y~x,
+              alpha=0.1,
+              size=0.2,
+              level=0.95,
+              fullrange=TRUE) +
+  geom_text(data=annotate,
+            aes(x=x,
+                y=y,
+                label=text),
+            color='black',
+            hjust='inward',
+            vjust='inward',
+            parse=TRUE,
+            size=3) +
+  labs(x='Year',
+       y='Home Field Advantage [kg/ha]',
+       title='BLUP Home',
+       color=NULL) +
+  theme_minimal() +
+  theme(#panel.grid=element_blank(),
+        axis.title=element_text(size=9),
+        axis.ticks=element_line(color='gray',
+                                size=0.2))
+blup_plot
+```
+
+# Linear
+Uses the raw average performance at each site for each variety to ID home.
+```{r}
+lin_df = df
+lin_df$is_home = NULL
+pop_hfa_lin = permute_hfa(lin_df, level='population', 
+                           site, year, geno, pheno, popn, 
+                           times=permute_times, seed=seed, blup_home=FALSE)
+```
+
+
+```{r}
+cbind(observed = pop_hfa_lin$perms[, 1], 
+      expected = pop_hfa_lin$perms[, 1] - pop_hfa_lin$home_field[, 'median'],
+      pop_hfa_lin$home_field)
+```
+Andean HFA was not larger than expected by chance. Durango and Mesoamerican lines both received more HFA benefit than expected. 
+
+Does this change across time?
+
+```{r}
+temp_hfa_lin = temporal_hfa(lin_df, site, year, geno, pheno, popn, blup_home=FALSE)
+```
+
+### TABLE S3: HFA ~ Time Anova
+```{r}
+temp_hfa_lin$anova
+```
+Year matters for some races
+
+```{r}
+tabs3_data = temp_hfa_lin$anova
+rownames(tabs3_data) %<>%
+  gsub('_num', '', .) %>% 
+  gsub('\\:', '*', .)
+tabs3 = tabs3_data %<>%
+  data.frame(X = rownames(.),
+             .) %>% 
+  set_colnames(c(' ', colnames(tabs3_data))) %>% 
+  gt %>% 
+  fmt_number(columns=c('Sum Sq'), n_sigfig=4) %>% 
+  fmt_number(columns='F value', decimals=2) %>% 
+  fmt_number(columns='Pr(>F)', decimals=3) %>% 
+  fmt_missing(columns=c(4, 5), missing_text='-') %>% 
+  tab_header('Table S3 (lin HFA)',
+             subtitle='ANOVA of Home Field Advantage Across Time') %>% 
+  opt_align_table_header(align='left') %>% 
+  cols_align('right',
+             columns=' ')
+  
+tabs3
+```
+
+```{r}
+temp_hfa_lin$model %>% summary
+```
+
+## Plot
+First generate the supplementary datasets
+```{r}
+thfa_df = temp_hfa_lin$temporal_hfa
+# format x axis
+year_num = paste0(year, '_num')
+year_num0 = gsub('num', 'num0', year_num)
+
+thfa_df[, year_num0] = thfa_df[, year_num] - min(thfa_df[, year_num])
+
+xstep = 10
+xrange = thfa_df[, year_num] %>% 
+  range
+xmin = xrange[1] %>% 
+  divide_by(xstep) %>% 
+  floor %>% 
+  multiply_by(xstep)
+xmax = xrange[2]
+xbreaks = seq(xmin, xmax, by=xstep)
+xbreaks_minor = xbreaks + (xstep/2)
+
+# generate formula annotations for each model
+ff = temp_hfa_lin$formulas$anova %>% 
+  gsub('\\*', '', .) %>% 
+  gsub(popn, '', .) %>%
+  gsub(year_num, year_num0, .) %>% 
+  formula
+annotate = split(thfa_df, thfa_df[, popn]) %>% 
+  sapply(function(x) {
+    mod = lm(ff, data=x) %>% 
+      summary %>% 
+      coef
+    p_val = mod[2, 4]
+    # if (p_val <= 0.05) {
+      f1 = paste('italic(y)==', 
+                 signif(mod[1, 1], 3), '~+~', 
+                 signif(mod[2, 1], 3), '~italic(x)', 
+                 sep='') 
+      f2 = ifelse(p_val < 0.001,
+                  'italic(p)~<~0.001',
+                  paste('italic(p)==', signif(p_val, 1)))
+      out = paste('list(', f1, ',', f2, ')', sep='')
+    # } else {
+      # out = 'n.s.' 
+    # }
+    return(out)
+  })
+annotate =
+  data.frame(popn = names(annotate),
+             text = annotate,
+             x = 1980,
+             y = 1400)
+names(annotate) %<>% 
+  gsub('popn', popn, .)
+
+# generate ribbons for expected values
+exp_hfa = pop_hfa_lin$perms %>% 
+  .[, -c(1)] %>% 
+  apply(1, function(x) {
+    c(p50 = median(x),
+      p05 = quantile(x, 0.05) %>% set_names(NULL),
+      p95 = quantile(x, 0.95) %>% set_names(NULL))
+  }) %>% 
+  t
+exp_hfa %<>% data.frame(
+  popn = rownames(.),
+  .
+) %>% 
+  set_rownames(NULL) %>% 
+  rbind(., .)
+exp_hfa$x_val = c(
+  rep(xrange[1], nrow(exp_hfa)/2),
+  rep(xrange[2], nrow(exp_hfa)/2)
+)
+names(exp_hfa) %<>% gsub('popn', popn, .)
+```
+
+
+```{r fig.height=3, fig.width=6.5}
+thfa_df %<>% .[, c(paste0(year, '_num'), 
+                   paste0(year, '_num0'),
+                   'Estimate', popn, 'Std.Error')]
+lin_plot = thfa_df %>% 
+  ggplot(aes_string(x=paste0(year, '_num'),
+                    y='Estimate',
+                    color=popn,
+                    fill=popn,
+                    grp.label=popn)) +
+  facet_wrap(paste('~', popn) %>% formula,
+             nrow=1) +
+  ylim(-900, 2000) +
+  scale_color_manual(values=colors, guide=NULL) +
+  scale_fill_manual(values=colors, guide=NULL) +
+  scale_x_continuous(breaks=xbreaks, minor_breaks=xbreaks_minor) +
+  geom_hline(aes(yintercept=0),
+             size=0.2,
+             color='gray') +
+  geom_ribbon(data=exp_hfa,
+              aes_string(ymin='p05',
+                         ymax='p95',
+                         x='x_val'),
+              fill='#EEEEEE',
+              alpha=1,
+              inherit.aes=FALSE) +
+  geom_pointrange(aes(ymin=Estimate - Std.Error,
+                      ymax=Estimate + Std.Error),
+                  shape=20,
+                  size=0.2) +
+  geom_smooth(method='lm',
+              formula=y~x,
+              alpha=0.1,
+              size=0.2,
+              level=0.95,
+              fullrange=TRUE) +
+  geom_text(data=annotate,
+            aes(x=x,
+                y=y,
+                label=text),
+            color='black',
+            hjust='inward',
+            vjust='inward',
+            parse=TRUE,
+            size=3) +
+  labs(x='Year',
+       y='Home Field Advantage [kg/ha]',
+       title='Raw Average Home',
+       color=NULL) +
+  theme_minimal() +
+  theme(#panel.grid=element_blank(),
+        axis.title=element_text(size=9),
+        axis.ticks=element_line(color='gray',
+                                size=0.2))
+lin_plot
+```
+
+# Comparison at Entry Level
+```{r}
+process_permute = function(x, obs_name=c('BLUP', 'Average')) {
+  obs_name = match.arg(obs_name)
+  df = x$home_field[, c('Race', 'Taxa')]
+  obs = x$perms %>% 
+    do.call(rbind, .)
+  df[, obs_name] = obs[df[, 'Taxa'], 1]
+  return(df)
+}
+
+shrink_hfa = permute_hfa(df, 
+                         level='genotype', 
+                         site, 
+                         year, 
+                         geno, 
+                         pheno, 
+                         popn, 
+                         times=1, 
+                         blup_home=TRUE) %>% 
+  process_permute(obs_name='BLUP')
+
+lin_hfa = permute_hfa(df, 
+                      level='genotype', 
+                      site, 
+                      year, 
+                      geno, 
+                      pheno, 
+                      popn, 
+                      times=1, 
+                      blup_home=FALSE) %>% 
+  process_permute(obs_name='Average')
+```
+
+```{r}
+geno_hfa_compare = merge(shrink_hfa, lin_hfa, by=c(popn, geno))
+
+geno_hfa_compare_plt = ggplot(geno_hfa_compare,
+                              aes(x=Average,
+                                  y=BLUP,
+                                  color=Race)) +
+  scale_color_manual(values=colors) +
+  coord_equal() +
+  geom_hline(aes(yintercept=0),
+             size=0.2,
+             color='darkgray') +
+  geom_vline(aes(xintercept=0),
+             size=0.2,
+             color='darkgray') +
+  geom_point(size=0.5) +
+  geom_smooth(aes(x=Average,
+                  y=BLUP), 
+              inherit.aes=FALSE,
+              method='lm',
+              formula=y~x,
+              size=0.2,
+              level=0.95,
+              fullrange=TRUE,
+              alpha=0.1,
+              color='darkgray') +
+  geom_abline(aes(intercept=0,
+                  slope=1),
+              linetype='dashed',
+              size=0.2,
+              color='darkgray') +
+  labs(x='Raw Average Home',
+       y='BLUP Home',
+       main='HFA of Each Entry [kg/ha]') +
+  theme_minimal() %>% 
+  gg_themer
+geno_hfa_compare_plt +
+  theme(legend.title=element_text(size=8))
+```
+
+# Combine and export
+```{r fig.height=9, fig.width=6.5}
+p1 = blup_plot
+p2 = lin_plot
+p3 = geno_hfa_compare_plt +
+  ggtitle('HFA of each entry [kg/ha]') +
+  theme(legend.position='none')
+
+grid.arrange(grobs=list(p1, p2, p3),
+             layout_matrix=rbind(c(1,1,1),
+                                 c(2,2,2),
+                                 c(NA,3,NA)))
+```
+
+
+```{r}
+if (export) {
+ out = "Figure S1 - Compare BLUP and average HFA.jpg" %>% 
+    here('results', .)
+  jpeg(out, width=8.5, height=5, units='in', res=300)
+  grid.arrange(grobs=list(p1, p2, p3),
+             layout_matrix=rbind(c(1,3),
+                                 c(2,3)))
+  dev.off()
+}
+```
+
