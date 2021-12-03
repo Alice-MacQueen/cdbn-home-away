@@ -82,7 +82,7 @@ prettynames = c(
 Export results to figures, rdata, etc?
 ```{r load}
 export = FALSE
-export = TRUE
+# export = TRUE
 ```
 
 ### Libraries and functions
@@ -110,16 +110,32 @@ libs = c(
   'gt',          
 ## Spatial/mapping
   'sf',
-  'rnaturalearth'
+  'rnaturalearth',
+  'rnaturalearthdata',
+  'rgeos'  # unlisted sf dependency
 )
 
-fn_path = file.path(getwd(), 'R', 'functions')
+for (i in libs) { # install if necessary
+  if (!require(i, character.only=TRUE)) {
+    install.packages(i)
+    library(i, character.only=TRUE)
+  }
+}
+
+fn_path = here('R', 'functions')
 for (i in list.files(fn_path, full.names=TRUE)) {
   source(i)
 }
-
-for (i in libs) get_libraries(i)  # install if necessary
 ```
+
+Versions
+```{r}
+sapply(libs, packageVersion) %>% 
+  sapply(paste, collapse='.') %>% 
+  c(R = version$version.string) %>% 
+as.matrix
+```
+
 
 ### Load and munge
 
@@ -703,7 +719,7 @@ distinct.
 ## Estimate
 ### ID Home Site
 ```{r}
-ncpu = detectCores()
+ncpu = ifelse(grepl('mingw', version$os), 1, detectCores())
 dd = mclapply(race, function(x) {
   x = df[, popn] == x
   x = df[x, ]
@@ -955,7 +971,8 @@ run_permutation = !(file.exists(hfa_rdata))
 if (run_permutation) {
   population_hfa = permute_hfa(df, level='population', 
                                site, year, geno, pheno, popn, 
-                               times=999, seed=seed)
+                               times=999, seed=seed, 
+                               parallel=!grepl('mingw', version$os))
 }
 ```
 
@@ -1730,7 +1747,8 @@ To calculate site HFA:
 ```{r}
 # identify HFA conferred to varieties
 geno_hfa = permute_hfa(df, level='genotype', site, year, geno, pheno, popn, times=1,
-                       seed=seed)
+                       seed=seed, 
+                       parallel=!grepl('mingw', version$os))
 
 geno_hfa %<>%
   extract2('perms') %>% 
@@ -1993,5 +2011,9 @@ if (export) {
   here(out_dir, 'figure data', 'Fig S3 - faceted best breeding sites.gpkg') %>% 
     st_write(bs_plot, ., delete_layer=export)
 }
+```
+
+```{r}
+
 ```
 
