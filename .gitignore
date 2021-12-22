@@ -42,3 +42,11 @@ vignettes/*.pdf
 *.bk
 data/Filter_150Ct_MAF5per_CDBN_001_359_parents_fillin_names_QC_impute.rds
 data/SVD/SVD*.rds
+# Manhattan plots from the Genetics paper using the CDBN
+analysis/GWAS_CDBN_METG/* 
+# Manuscript files that were works in progress
+manuscript/*
+R/Location_by_year_weather_PCA.Rmd
+R/Analysis_h2.Rmd
+data-raw/Prepare_project_data_v0.Rmd
+

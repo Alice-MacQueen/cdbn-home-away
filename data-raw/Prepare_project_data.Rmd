@@ -1,0 +1,92 @@
+---
+title: "Prepare project data"
+author: "Alice MacQueen"
+date: 2020-06-10
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(bigsnpr)
+```
+
+# Location data
+
+The key to link this with other files is `Location_code`. 
+
+There is other location-specific data, but this is the smallest informative set of location info.
+
+```{r}
+load("~/Github/CDBNGXE/data/Locations_small.rda")
+
+locations <- Locations_small %>%
+  select(Location_code, State, Lat_best, Long_best, Elev_best, Location) %>%
+  rename(Latitude = Lat_best, Longitude = Long_best, Elevation = Elev_best)
+save(locations, file = "../data/locations.rda")
+```
+
+# Germplasm data
+```{r}
+load("C:/Users/alice/Documents/Github/CDBNgenomics/data/metadata.rda")
+metadata <- metadata %>%
+  dplyr::select(Taxa, Genotype, Seq_ID, Gene_pool:Earliest_Year_CDBN) %>%
+  rename(CDBN_ID = Genotype, Market_class = Market_class_ahm) %>%
+  mutate(Race = case_when(Race == "Jalisco" ~ "Durango",
+                          TRUE ~ Race)) %>%
+  arrange(Taxa)
+save(metadata, file = "../data/metadata.rda")
+```
+
+# Phenotypes of sequenced individuals
+
+There is more data, for ~200 unsequenced individuals, and additional phenotypes, but seed yield is the major phenotype and has the most data.
+
+Bean breeders have told me that there is little to no difference between the Durango and Jalisco races and that all Jalisco individuals should be considered Durango, so I change the Race for Jalisco individuals to Durango here.
+Also, apparently I made a mistake with Rojo Chiquito's race in the phenotypes file, it's a weird Red Mesoamerican type. Phil Miklas confirmed during one draft reading.
+```{r}
+phenotypes <- read_csv("Phenotypes_of_sequenced_individuals_home_away_analysis.csv")
+phenotypes <- phenotypes %>%
+  mutate(Race = case_when(Race == "Jalisco" ~ "Durango",
+                          Seq_ID == "CDBN_192" ~ "Mesoamerican",
+                          TRUE ~ Race)) 
+save(phenotypes, file = "../data/phenotypes.rda")
+```
+
+Test joining of data frames
+```{r}
+phenotypes %>%
+  anti_join(locations, by = "Location_code")
+phenotypes %>%
+  anti_join(metadata, by = c("Taxa", "CDBN_ID", "Seq_ID", "Race"))
+```
+
+Locations and germplasm metadata now join with the phenotype data without any errors.
+
+
+# SNP data
+
+Unfortunately, the backing file (`.bk`) to replicate this analysis is too large to share over Github, but I can share this file as needed to rerun this analysis.
+```{r}
+snp <- snp_attach("../data/Filter_150Ct_MAF5per_CDBN_001_359_parents_fillin_names_QC_impute.rds")
+pl <- snp$fam$sample.ID %>%
+  enframe(name = NULL, value = "Species_Taxa") %>%
+  separate(col = Species_Taxa, into = c("Species", "Taxa"), sep = 10) %>%
+  mutate(Taxa = case_when(grepl("_cat$", Taxa) ~ str_sub(Taxa, end = -5), 
+                          grepl("_cat1$", Taxa) ~ str_sub(Taxa, end = -6), 
+                          grepl("_cat2$", Taxa) ~ str_sub(Taxa, end = -6), 
+                          TRUE ~ Taxa)) 
+metadata %>% anti_join(pl)
+
+snp$fam$sample.ID <- pl$Taxa
+snp_save(snp)
+
+phenotypes %>%
+  filter(grepl("COSD_35", Taxa))
+```
+CDBN_132_Pulsar	Pulsar	CDBN_132	MA	Mesoamerican	  35 SY 
+CDBN_307_Shiny_Crow	Shiny_Crow	CDBN_307	MA	Mesoamerican	56 SY
+CDBN_345_COSD_35    10 SY
+
+are in metadata but not in this SNP file. I don't remember why these were dropped or at any rate aren't included in this SNP file. Choosing to ignore them and keep going with 324 genotypes for now.
+
