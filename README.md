@@ -1,41 +1,27 @@
 # cdbn-home-away
 
-Copied from: https://docs.google.com/document/d/1ffZ6ykXoJNOhY32OOt-BrQvK4rGIWy9Cj8uluUl9qys/edit
+This Github repository has data and scripts needed to replicate the analyses in the paper:
+"Local to continental-scale variation in fitness and heritability in common bean (*Phaseolus vulgaris*)"
 
-Home field advantage in two domestication clades of common bean
 
-Potential Authors
-
+## Authors
 Patrick Ewing, Alice H. MacQueen, Jeffrey W. White, Phillip E. McClean, Bryan Runck, Michael Kantar, Colin Khoury, Phil Miklas
 
-Target Audience:  Ecology and Evolution community
-Target journal: Proceedings of the Royal Society B
+## Questions
+What is the role of plant breeding on local adaptation in a selfing species?
 
-Introduction
-Bean Ecology
-Bean Domestication
-Bean Improvement
-Local Adaptation
+What is the role of plant breeding on local adaptation in different domestication clades?
+How does the amount of local adaptation over time?
 
-Questions
-What is the role of plant breeding on local adaptation of a selfing species?
+# Data in data/ folder
 
+phenotypes.rda is an R object that contains biomass/yield data (column: SY) for 35 years of the CDBN (column:Year) over multiple locations (column: Location_code). Bean gene pool, Race, and a CDBN ID and Seq_ID to tie to previously published GBS data is also available.
 
-What is the role of plant breeding on local adaptation  of different domestication events?
-What is the role of local adaptation over time?
+# Results in results/ folder
+Contains the figures and tables generated for the published paper.
 
-Potential Data
+## Data in data-raw/
+Contains code to prepare the datasets used in this publication.
 
-Biomass over 35 years, 11 common checks, multiple locations
-Yield over 35 years, 11 common checks, multiple locations
-non-conformable arrays
-Kinship Matrix for all ~300 accession
-
-Potential Analysis
-
-Standard expectation of home field advantage
-Kinship standardized expected Home field advantage
-Different areal extents of local
-Universal and local phenotypes → performance, and traits controlling
-
-Do the analysis separated by domestication events
+## Code in R/
+Contains code to run the analyses used in this publication.
