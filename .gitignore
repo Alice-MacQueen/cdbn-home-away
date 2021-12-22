@@ -49,4 +49,4 @@ manuscript/*
 R/Location_by_year_weather_PCA.Rmd
 R/Analysis_h2.Rmd
 data-raw/Prepare_project_data_v0.Rmd
-
+analysis/heritability/h2_table*
