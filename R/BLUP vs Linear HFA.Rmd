@@ -1,8 +1,8 @@
 ---
 title: "BLUP vs Linear HFA"
 author: "PME"
-date: "9/16/2021"
-date: "`r format(Sys.time(), '%d %B, %Y, %H:%M')`"
+created: "9/16/2021"
+modified: "`r format(Sys.time(), '%d %B, %Y, %H:%M')`"
 knit: (function(inputFile, encoding) {
   rmarkdown::render(inputFile, encoding=encoding, output_dir=here::here('results'))})
 output:
@@ -49,7 +49,7 @@ race = c('Durango', 'Mesoamerican', 'Nueva Granada')
 names(race) = race
 
 seed = 4456  # for permutations
-permute_times = 999
+permute_times = 99
 
 color_palette='FantasticFox1'
 
@@ -97,12 +97,17 @@ libs = c(
   'gt'
 )
 
-fn_path = file.path(getwd(), 'R', 'functions')
+for (i in libs) { # install if necessary
+  if (!require(i, character.only=TRUE)) {
+    install.packages(i)
+    library(i, character.only=TRUE)
+  }
+}
+
+fn_path = here('R', 'functions')
 for (i in list.files(fn_path, full.names=TRUE)) {
   source(i)
 }
-
-for (i in libs) get_libraries(i)  # install if necessary
 ```
 
 ### Load and munge
@@ -217,7 +222,8 @@ blup_df = df
 blup_df$is_home = NULL
 pop_hfa_blup = permute_hfa(blup_df, level='population', 
                            site, year, geno, pheno, popn, 
-                           times=permute_times, seed=seed, blup_home=TRUE)
+                           times=permute_times, seed=seed, blup_home=TRUE,
+                           parallel=!grepl('mingw', version$os))
 ```
 
 
@@ -409,7 +415,8 @@ lin_df = df
 lin_df$is_home = NULL
 pop_hfa_lin = permute_hfa(lin_df, level='population', 
                            site, year, geno, pheno, popn, 
-                           times=permute_times, seed=seed, blup_home=FALSE)
+                           times=permute_times, seed=seed, blup_home=FALSE,
+                           parallel=!grepl('mingw', version$os))
 ```
 
 
@@ -613,7 +620,8 @@ shrink_hfa = permute_hfa(df,
                          pheno, 
                          popn, 
                          times=1, 
-                         blup_home=TRUE) %>% 
+                         blup_home=TRUE,
+                         parallel=!grepl('mingw', version$os)) %>% 
   process_permute(obs_name='BLUP')
 
 lin_hfa = permute_hfa(df, 
@@ -624,7 +632,8 @@ lin_hfa = permute_hfa(df,
                       pheno, 
                       popn, 
                       times=1, 
-                      blup_home=FALSE) %>% 
+                      blup_home=FALSE,
+                      parallel=!grepl('mingw', version$os)) %>% 
   process_permute(obs_name='Average')
 ```
 

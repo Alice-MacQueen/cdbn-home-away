@@ -68,6 +68,7 @@ temporal_hfa = function(data, site, year, geno, pheno, popn=NA,
   require(parallel)
   require(car)
   
+  if (grepl('mingw', version$os)) parallel=FALSE
   ncpu = ifelse(parallel, detectCores(), 1)
   
   # set up dataframe
