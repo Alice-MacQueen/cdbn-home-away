@@ -36,11 +36,11 @@ Data are from yield trials of pre-release bean lines conducted across the US and
 in_dir = 'data'  # within the R project
 in_perf = 'Phenotypes_of_sequenced_individuals_home_away_analysis.csv'  # yield data
 in_kin_dir = 'Kinship'  # kinship matrices, courtesy of Alice MacQueen
-in_kin_pattern = c('Kinship_', '_Race.rds')
+in_kin_pattern = c('Kinship_', '_Race.rds')  # for dynamic loading of each race. ex. Kinship_Durango_Race.rds
 
 
 in_PC_dir = 'SVD'  # LD-adjusted genetic distance on 10 PCs, courtesy of Alice MacQueen
-in_PC_pattern = c('SVD_10_PCs_', '_Race.csv')
+in_PC_pattern = c('SVD_10_PCs_', '_Race.csv') # for dynamic loading of each race
 in_locations = 'locations.rda'
 in_heritability = "bean_heritability_by_year_site_race.csv" # courtesy of Mikey Kantar
 
